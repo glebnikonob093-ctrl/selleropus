@@ -1,0 +1,8 @@
+.venv
+data
+.env
+__pycache__
+*.pyc
+webapp/node_modules
+webapp/dist
+tests
