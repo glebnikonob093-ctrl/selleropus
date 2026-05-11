@@ -4,13 +4,26 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
+
+
+def _unicode_lower(value: object) -> object:
+    """SQLite-side ``LOWER`` that case-folds Unicode (including Cyrillic).
+
+    SQLite's built-in ``LOWER`` only handles ASCII, so SQLAlchemy's ``ilike``
+    fails to match "иван" against "Иван" on SQLite. Registering Python's
+    Unicode-aware ``str.lower`` as the database's ``LOWER`` function fixes
+    this transparently for every query.
+    """
+    if isinstance(value, str):
+        return value.lower()
+    return value
 
 
 def ensure_sqlite_dir(database_url: str) -> None:
@@ -25,7 +38,21 @@ def ensure_sqlite_dir(database_url: str) -> None:
 
 
 def create_engine(database_url: str) -> AsyncEngine:
-    return create_async_engine(database_url, future=True)
+    engine = create_async_engine(database_url, future=True)
+    if database_url.startswith("sqlite"):
+        @event.listens_for(engine.sync_engine, "connect")
+        def _register_unicode_lower(dbapi_conn, _connection_record):  # type: ignore[no-redef]
+            # aiosqlite wraps sqlite3.Connection; fall back to the wrapper
+            # itself for plain pysqlite engines.
+            raw = getattr(dbapi_conn, "_conn", None) or dbapi_conn
+            try:
+                raw.create_function("lower", 1, _unicode_lower)
+            except Exception:
+                # If create_function isn't available we leave the default
+                # ASCII-only LOWER in place — ilike will still work for ASCII.
+                pass
+
+    return engine
 
 
 def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
