@@ -7,7 +7,6 @@ a Unicode-aware LOWER function, ``Client.name.ilike(...)`` fails to match
 from __future__ import annotations
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import create_engine, create_session_factory
 from app.migrations import create_all
@@ -19,7 +18,7 @@ async def test_ilike_matches_cyrillic_case_insensitively() -> None:
     await create_all(engine)
     factory = create_session_factory(engine)
     try:
-        async with factory() as session:  # type: AsyncSession
+        async with factory() as session:
             master = Master(
                 tg_user_id=1,
                 tg_chat_id=1,

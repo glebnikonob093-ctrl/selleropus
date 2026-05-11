@@ -2,10 +2,13 @@
 
 This catches FastAPI-level import-time validation errors (e.g. routes with
 `status_code=204` that still declare a JSON body, which crash the assertion
-in `fastapi.routing.APIRoute.__init__`).
+in `fastapi.routing.APIRoute.__init__`, or SPA-fallback routes whose return
+annotation is a Union that FastAPI can't turn into a Pydantic response field).
 """
 
 from __future__ import annotations
+
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -14,14 +17,14 @@ from app.api import create_api_app
 from app.config import Settings
 
 
-def _settings() -> Settings:
+def _settings(webapp_dist_dir: str = "") -> Settings:
     return Settings(
         bot_token="TEST_TOKEN",
         database_url="sqlite+aiosqlite:///:memory:",
         api_host="127.0.0.1",
         api_port=8000,
         webapp_url="",
-        webapp_dist_dir="",
+        webapp_dist_dir=webapp_dist_dir,
         telegram_proxy_url="",
         scheduler_interval_seconds=60,
         default_work_start=(10, 0),
@@ -40,8 +43,6 @@ def test_create_api_app_registers_expected_routes(
         notifier=None,
     )
     paths = {route.path for route in app.routes if hasattr(route, "path")}
-
-    # Sanity-check that core routers are mounted.
     for required in (
         "/api/health",
         "/api/me",
@@ -59,6 +60,26 @@ def test_create_api_app_registers_expected_routes(
         "/api/public/{slug}/bookings",
     ):
         assert required in paths, f"missing route: {required}"
+
+
+def test_create_api_app_with_webapp_dist_dir(
+    session_factory: async_sessionmaker, tmp_path: Path
+) -> None:
+    """Regression: SPA fallback route uses a union return type which without
+    response_model=None makes FastAPI try (and fail) to build a pydantic
+    response field."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html></html>", encoding="utf-8")
+    app = create_api_app(
+        settings=_settings(webapp_dist_dir=str(dist)),
+        session_factory=session_factory,
+        notifier=None,
+    )
+    catch_all = [
+        r for r in app.routes if getattr(r, "path", "") == "/{full_path:path}"
+    ]
+    assert catch_all, "SPA catch-all route missing"
 
 
 @pytest.mark.parametrize(
