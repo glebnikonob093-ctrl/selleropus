@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -161,11 +161,12 @@ async def update_client(
     return ClientOut.from_model(client)
 
 
-@router.delete("/{client_id}", status_code=204)
+@router.delete("/{client_id}", status_code=204, response_class=Response)
 async def delete_client(
     client_id: int,
     master: Master = Depends(get_current_master),
     session: AsyncSession = Depends(get_session),
-) -> None:
+) -> Response:
     client = await _get_owned_client(session, master, client_id)
     await session.delete(client)
+    return Response(status_code=204)
