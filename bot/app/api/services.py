@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -105,12 +105,13 @@ async def update_service(
     return ServiceOut.from_model(svc)
 
 
-@router.delete("/{service_id}", status_code=204)
+@router.delete("/{service_id}", status_code=204, response_class=Response)
 async def delete_service(
     service_id: int,
     master: Master = Depends(get_current_master),
     session: AsyncSession = Depends(get_session),
-) -> None:
+) -> Response:
     svc = await _get_owned_service(session, master, service_id)
     # Soft delete to keep historical bookings/stats intact.
     svc.is_active = False
+    return Response(status_code=204)

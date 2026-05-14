@@ -46,11 +46,17 @@ def load_settings() -> Settings:
     if not bot_token:
         raise RuntimeError("BOT_TOKEN is required (set it in bot/.env)")
 
+    # Cloud providers (Railway/Render/Fly.io/Heroku) inject ``PORT`` and
+    # expect the app to bind to ``0.0.0.0``. Honour both so a deployment
+    # works without overriding our local-dev defaults.
+    cloud_port_raw = os.getenv("PORT", "").strip()
+    api_host_default = "0.0.0.0" if cloud_port_raw else "127.0.0.1"
+
     return Settings(
         bot_token=bot_token,
         database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db"),
-        api_host=os.getenv("API_HOST", "127.0.0.1"),
-        api_port=_get_int("API_PORT", 8000),
+        api_host=os.getenv("API_HOST", api_host_default),
+        api_port=_get_int("PORT", _get_int("API_PORT", 8000)),
         webapp_url=os.getenv("WEBAPP_URL", "").strip(),
         webapp_dist_dir=os.getenv("WEBAPP_DIST_DIR", "").strip(),
         telegram_proxy_url=os.getenv("TELEGRAM_PROXY_URL", "").strip(),
