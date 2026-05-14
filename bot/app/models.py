@@ -42,7 +42,13 @@ ACTIVE_BOOKING_STATUSES = (
 
 
 class Master(Base):
-    """A self-employed user (the bot's customer). Owns services, clients and bookings."""
+    """A bot user. Acts as a master only when ``is_master`` is true; otherwise
+    a regular user (e.g. someone who pressed /start but has not been approved).
+
+    The table is named ``masters`` for historical reasons — every bot user is
+    represented by a row here regardless of role, because we want one unified
+    identity per Telegram account that can later be promoted to master/admin.
+    """
 
     __tablename__ = "masters"
 
@@ -59,6 +65,13 @@ class Master(Base):
     work_start_minutes: Mapped[int] = mapped_column(Integer, default=10 * 60)  # 10:00
     work_end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)  # 20:00
     slot_step_minutes: Mapped[int] = mapped_column(Integer, default=30)
+
+    # Role flags. ``is_master`` gates access to the Mini App's master features
+    # and the master-scoped API; ``is_admin`` gates the admin panel and admin
+    # endpoints. They are independent so you can have admin-only accounts that
+    # don't take bookings themselves.
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

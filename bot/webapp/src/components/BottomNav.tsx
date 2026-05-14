@@ -1,6 +1,8 @@
 import { NavLink } from "react-router-dom";
 
-const TABS: Array<{ to: string; label: string; icon: string }> = [
+type Tab = { to: string; label: string; icon: string };
+
+const MASTER_TABS: Tab[] = [
   { to: "/", label: "Сегодня", icon: "🗓️" },
   { to: "/bookings", label: "Записи", icon: "📋" },
   { to: "/clients", label: "Клиенты", icon: "👥" },
@@ -8,10 +10,13 @@ const TABS: Array<{ to: string; label: string; icon: string }> = [
   { to: "/stats", label: "Доход", icon: "📈" },
 ];
 
-export function BottomNav() {
+const ADMIN_TAB: Tab = { to: "/admin", label: "Админ", icon: "🛡️" };
+
+export function BottomNav({ isAdmin = false }: { isAdmin?: boolean }) {
+  const tabs = isAdmin ? [...MASTER_TABS, ADMIN_TAB] : MASTER_TABS;
   return (
     <nav className="bottom-nav">
-      {TABS.map((tab) => (
+      {tabs.map((tab) => (
         <NavLink
           key={tab.to}
           to={tab.to}

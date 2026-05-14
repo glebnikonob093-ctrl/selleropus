@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.api.admin import router as admin_router
 from app.api.bookings import router as bookings_router
 from app.api.clients import router as clients_router
 from app.api.deps import AppState
@@ -58,6 +59,7 @@ def create_api_app(
     app.include_router(bookings_router)
     app.include_router(stats_router)
     app.include_router(public_router)
+    app.include_router(admin_router)
 
     dist_dir = (settings.webapp_dist_dir or "").strip()
     if dist_dir:

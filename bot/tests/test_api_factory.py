@@ -31,6 +31,9 @@ def _settings(webapp_dist_dir: str = "") -> Settings:
         default_work_end=(20, 0),
         default_slot_step_minutes=30,
         default_timezone="UTC",
+        admin_tg_ids=(),
+        admin_contact_url="",
+        become_master_conditions="",
     )
 
 

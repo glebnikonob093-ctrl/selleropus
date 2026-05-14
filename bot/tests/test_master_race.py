@@ -48,6 +48,12 @@ def _settings() -> Settings:
         default_work_end=(20, 0),
         default_slot_step_minutes=30,
         default_timezone="UTC",
+        # Make the parallel-request user an admin so it bypasses the
+        # ``get_current_active_master`` gate and can call master routes on
+        # first paint without first being promoted.
+        admin_tg_ids=(424242,),
+        admin_contact_url="tg://user?id=424242",
+        become_master_conditions="",
     )
 
 

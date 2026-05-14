@@ -16,7 +16,24 @@ export interface Me {
   work_start_minutes: number;
   work_end_minutes: number;
   slot_step_minutes: number;
+  is_master: boolean;
+  is_admin: boolean;
+  admin_contact_url: string;
+  become_master_conditions: string;
   public_link_path: string;
+}
+
+export type AdminUserRole = "master" | "admin" | "pending";
+
+export interface AdminUser {
+  id: number;
+  tg_user_id: number;
+  tg_username: string | null;
+  display_name: string;
+  slug: string;
+  is_master: boolean;
+  is_admin: boolean;
+  created_at: string;
 }
 
 export interface Service {

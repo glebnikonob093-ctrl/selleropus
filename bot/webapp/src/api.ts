@@ -1,4 +1,6 @@
 import type {
+  AdminUser,
+  AdminUserRole,
   Booking,
   Client,
   ClientDetail,
@@ -135,6 +137,23 @@ export const api = {
       "GET",
       `/api/stats/return-clients?threshold_days=${thresholdDays}`,
     ),
+
+  listAdminUsers: (role?: AdminUserRole) =>
+    request<AdminUser[]>(
+      "GET",
+      role ? `/api/admin/users?role=${role}` : "/api/admin/users",
+    ),
+  addMasterByTgId: (payload: {
+    tg_user_id: number;
+    display_name?: string | null;
+    tg_username?: string | null;
+  }) => request<AdminUser>("POST", "/api/admin/users", payload),
+  setUserRoles: (
+    userId: number,
+    payload: { is_master?: boolean; is_admin?: boolean },
+  ) => request<AdminUser>("PATCH", `/api/admin/users/${userId}`, payload),
+  demoteMaster: (userId: number) =>
+    request<AdminUser>("DELETE", `/api/admin/users/${userId}/master`),
 
   getPublicMaster: (slug: string) =>
     request<PublicMasterPage>("GET", `/api/public/${slug}`),
