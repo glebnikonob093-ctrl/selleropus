@@ -154,6 +154,24 @@ async def create_public_booking(
     if starts_at < datetime.utcnow():
         raise HTTPException(status_code=400, detail="cannot book in the past")
 
+    # Validate that the requested slot actually lives on the master's grid.
+    # ``get_availability`` only returns grid-aligned slots inside working
+    # hours, so the legit Mini App flow always passes; this guard rejects
+    # crafted requests that try to book at, say, 11:17 on a 30-min step
+    # grid, or outside working hours, or with a service whose duration
+    # spills past the end of the day. ``starts_at.second`` is checked as a
+    # cheap proxy for "no sub-minute slot".
+    local_minutes = starts_at.hour * 60 + starts_at.minute
+    if (
+        starts_at.second != 0
+        or local_minutes < master.work_start_minutes
+        or local_minutes + service.duration_minutes > master.work_end_minutes
+        or (local_minutes - master.work_start_minutes) % master.slot_step_minutes != 0
+    ):
+        raise HTTPException(
+            status_code=400, detail="slot is not on master's grid"
+        )
+
     overlap_stmt = (
         select(Booking.id)
         .where(Booking.master_id == master.id)

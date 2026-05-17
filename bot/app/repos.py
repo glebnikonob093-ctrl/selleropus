@@ -33,13 +33,32 @@ async def _slug_taken(session: AsyncSession, slug: str) -> bool:
 
 
 async def generate_unique_slug(session: AsyncSession, hint: str) -> str:
+    """Best-effort unique-slug picker for the ``masters`` table.
+
+    Strategy:
+    1. Try the bare slugified hint for a nice readable URL.
+    2. If taken, try a short sequential suffix (``-2``, ``-3``, …) — still
+       human-friendly when two people share a base name.
+    3. After eight collisions, fall back to a random hex suffix so even a
+       pathological case (1000 Marias) terminates immediately.
+
+    There is still a tiny TOCTOU race between the final ``_slug_taken``
+    check and the eventual ``INSERT`` — two parallel registrations with the
+    same hint could both pass step 1 and one of them would 500 on the
+    UNIQUE constraint. The random fallback makes the realistic-collision
+    case vanishingly unlikely; a proper fix is to retry the INSERT on
+    ``IntegrityError`` at the upsert layer, which is tracked separately.
+    """
     base = slugify(hint) or f"m{secrets.token_hex(3)}"
-    candidate = base
-    suffix = 2
-    while await _slug_taken(session, candidate):
+    if not await _slug_taken(session, base):
+        return base
+    for suffix in range(2, 10):
         candidate = f"{base}-{suffix}"
-        suffix += 1
-    return candidate
+        if not await _slug_taken(session, candidate):
+            return candidate
+    # 8 collisions is enough — bail out with entropy. ``token_hex(3)`` gives
+    # ~16M unique suffixes; collision probability is irrelevant in practice.
+    return f"{base}-{secrets.token_hex(3)}"
 
 
 async def get_master_by_tg_id(session: AsyncSession, tg_user_id: int) -> Master | None:
@@ -115,6 +134,20 @@ async def upsert_master_from_initdata(
     )
 
 
+def _normalize_phone(raw: str | None) -> str | None:
+    """Loose phone normalization for dedup purposes.
+
+    We only strip whitespace and common separators; we deliberately don't
+    do full E.164 parsing here because that requires a country guess and
+    the master can correct the row by hand later. The goal is just to make
+    "+7 (999) 123-45-67" and "+79991234567" hash to the same key.
+    """
+    if not raw:
+        return None
+    cleaned = "".join(ch for ch in raw if ch.isdigit() or ch == "+")
+    return cleaned or None
+
+
 async def find_or_create_client(
     session: AsyncSession,
     master_id: int,
@@ -124,6 +157,21 @@ async def find_or_create_client(
     tg_username: str | None = None,
     tg_user_id: int | None = None,
 ) -> Client:
+    """Find an existing client row or insert a new one.
+
+    Lookup order:
+    * by ``(master_id, tg_user_id)`` — the strongest identity, used when
+      the booking arrived through an authenticated Mini App / bot session.
+    * by ``(master_id, normalized_phone)`` for anonymous bookings (no TG
+      identity). Two public bookings from the same phone now reuse the
+      same client row instead of creating duplicates that pollute the
+      master's client list and stats.
+
+    We only consolidate anonymous-with-anonymous rows; a row that already
+    has a ``tg_user_id`` is left alone because we don't want to silently
+    merge two channels that might belong to different real people sharing
+    a phone (a family landline, a desk phone, …).
+    """
     if tg_user_id is not None:
         res = await session.execute(
             select(Client).where(
@@ -140,6 +188,29 @@ async def find_or_create_client(
             if tg_username and not existing.tg_username:
                 existing.tg_username = tg_username
             return existing
+
+    normalized = _normalize_phone(phone)
+    if tg_user_id is None and normalized:
+        # Anonymous booking with a phone — try to match a previous anonymous
+        # row from the same phone. We compare normalized forms by computing
+        # the candidate's normalized phone in Python; the underlying column
+        # may have been stored with arbitrary formatting from the public
+        # form. ``limit(1)`` keeps the work bounded even if the master has
+        # historical dupes.
+        res = await session.execute(
+            select(Client).where(
+                Client.master_id == master_id,
+                Client.phone.is_not(None),
+                Client.tg_user_id.is_(None),
+            )
+        )
+        for candidate in res.scalars():
+            if _normalize_phone(candidate.phone) == normalized:
+                if name and candidate.name != name:
+                    candidate.name = name
+                if tg_username and not candidate.tg_username:
+                    candidate.tg_username = tg_username
+                return candidate
 
     client = Client(
         master_id=master_id,

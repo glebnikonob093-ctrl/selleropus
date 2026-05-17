@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -20,6 +21,15 @@ from app.repos import find_clients_to_return
 router = APIRouter(prefix="/api/stats", tags=["stats"])
 
 
+def _master_now(master: Master) -> datetime:
+    """Wall-clock "now" in the master's timezone, as a naive datetime."""
+    try:
+        tz = ZoneInfo(master.timezone or "UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).replace(tzinfo=None)
+
+
 class TopServiceItem(BaseModel):
     service_id: int
     service_name: str
@@ -37,8 +47,15 @@ class StatsResponse(BaseModel):
     top_services: list[TopServiceItem]
 
 
-def _period_window(period: str) -> tuple[datetime, datetime]:
-    now = datetime.utcnow()
+def _period_window(master: Master, period: str) -> tuple[datetime, datetime]:
+    """Compute the ``[start, end)`` window for a stats period.
+
+    Anchored to the master's local wall clock — the day/week/month boundary
+    must follow the master, not the server. A Moscow master asking for
+    "today's revenue" at 02:00 local previously got the UTC day window,
+    which excluded all bookings made between local midnight and 03:00.
+    """
+    now = _master_now(master)
     if period == "day":
         start = datetime(now.year, now.month, now.day)
         end = start + timedelta(days=1)
@@ -63,7 +80,7 @@ async def get_stats(
     master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> StatsResponse:
-    start, end = _period_window(period)
+    start, end = _period_window(master, period)
 
     total_q = select(func.count(Booking.id)).where(
         Booking.master_id == master.id,
