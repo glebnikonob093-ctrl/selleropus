@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -83,14 +84,22 @@ class BookingUpdate(BaseModel):
 
 
 def _master_local_today_window(master: Master) -> tuple[datetime, datetime]:
-    """Return (start_utc, end_utc) for "today" in the master's view.
+    """Return ``(start, end)`` for "today" as the master perceives it.
 
-    For the MVP we treat stored datetimes as local to the master and don't
-    convert timezones aggressively — this gives a reasonable answer until
-    proper tz handling is added.
+    All booking ``starts_at`` values are stored as naive datetimes in the
+    master's local wall clock (see the ``# naive UTC`` model comment — it's
+    misleading; in practice the API stores whatever the master sends).
+    So "today" must be anchored to the master's local midnight, not the
+    server's UTC midnight. Before this fix a Moscow master at 02:00 local
+    (= 23:00 UTC previous day) would see the *previous* UTC day's bookings
+    on the "Сегодня" tab until 03:00 local.
     """
-    now = datetime.utcnow()
-    day_start = datetime(now.year, now.month, now.day)
+    try:
+        tz = ZoneInfo(master.timezone or "UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    now_local = datetime.now(tz).replace(tzinfo=None)
+    day_start = datetime(now_local.year, now_local.month, now_local.day)
     return day_start, day_start + timedelta(days=1)
 
 

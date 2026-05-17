@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -103,24 +104,40 @@ async def _send_client_reminders(
                 log.exception("reminder_send_failed booking_id=%s kind=%s", booking.id, kind)
 
 
+def _master_local_now(master: Master) -> datetime:
+    """Wall-clock "now" in the master's TZ, as a naive ``datetime``.
+
+    Returns UTC-now when ``master.timezone`` is empty or unknown so we don't
+    silently skip the morning ping for a master with a corrupt TZ string.
+    """
+    try:
+        tz = ZoneInfo(master.timezone or "UTC")
+    except ZoneInfoNotFoundError:
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).replace(tzinfo=None)
+
+
 async def _send_morning_summaries(
     session_factory: async_sessionmaker[AsyncSession],
     notifier: Notifier,
 ) -> None:
-    """Once per day, around each master's morning, send a summary of today's bookings.
+    """Once per day, around each master's local 08:00, send a summary of today.
 
-    For the MVP we trigger when the local time is between 08:00 and 08:15 in the
-    master's timezone. We fall back to UTC math to keep it dependency-free.
+    The check is per-master (not global) so a Moscow master gets pinged at
+    08:00 MSK rather than 08:00 UTC (= 11:00 MSK). The 15-minute window
+    matches the scheduler's tick frequency: as long as the scheduler ticks
+    at least once between 08:00 and 08:15 local, every master gets exactly
+    one ping per day, idempotent via the per-day sentinel.
     """
-    now = datetime.utcnow()
-    if not (now.hour == 8 and now.minute < 15):
-        return
-
     async with session_scope(session_factory) as session:
         masters = list((await session.execute(select(Master))).scalars())
 
         for master in masters:
-            day_start = datetime(now.year, now.month, now.day)
+            local_now = _master_local_now(master)
+            if not (local_now.hour == 8 and local_now.minute < 15):
+                continue
+
+            day_start = datetime(local_now.year, local_now.month, local_now.day)
             day_end = day_start + timedelta(days=1)
             sentinel_kind = f"{REMINDER_MASTER_MORNING}:{day_start.date().isoformat()}"
 
