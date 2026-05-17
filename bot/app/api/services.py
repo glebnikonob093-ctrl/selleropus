@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_master, get_session
+from app.api.deps import get_current_active_master, get_session
 from app.models import Master, Service
 
 router = APIRouter(prefix="/api/services", tags=["services"])
@@ -45,7 +45,7 @@ class ServiceUpdate(BaseModel):
 
 @router.get("", response_model=list[ServiceOut])
 async def list_services(
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
     include_hidden: bool = False,
 ) -> list[ServiceOut]:
@@ -59,7 +59,7 @@ async def list_services(
 @router.post("", response_model=ServiceOut, status_code=201)
 async def create_service(
     payload: ServiceCreate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ServiceOut:
     svc = Service(
@@ -90,7 +90,7 @@ async def _get_owned_service(
 async def update_service(
     service_id: int,
     payload: ServiceUpdate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ServiceOut:
     svc = await _get_owned_service(session, master, service_id)
@@ -105,12 +105,13 @@ async def update_service(
     return ServiceOut.from_model(svc)
 
 
-@router.delete("/{service_id}", status_code=204)
+@router.delete("/{service_id}", status_code=204, response_class=Response)
 async def delete_service(
     service_id: int,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
-) -> None:
+) -> Response:
     svc = await _get_owned_service(session, master, service_id)
     # Soft delete to keep historical bookings/stats intact.
     svc.is_active = False
+    return Response(status_code=204)

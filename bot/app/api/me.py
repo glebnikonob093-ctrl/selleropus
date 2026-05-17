@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_master, get_session
+from app.api.deps import (
+    AppState,
+    get_app_state,
+    get_current_active_master,
+    get_current_user,
+    get_session,
+)
 from app.models import Master
 from app.repos import generate_unique_slug, slugify
 
@@ -22,12 +28,28 @@ class MeResponse(BaseModel):
     work_start_minutes: int
     work_end_minutes: int
     slot_step_minutes: int
+    is_master: bool
+    is_admin: bool
+    admin_contact_url: str = Field(
+        default="",
+        description=(
+            "Deep-link to the super-admin; rendered by the Mini App on the "
+            "'Become a master' screen. Empty when no admins are configured."
+        ),
+    )
+    become_master_conditions: str = Field(
+        default="",
+        description=(
+            "Plain-text conditions shown to non-masters who want to be "
+            "promoted. Configured via BECOME_MASTER_CONDITIONS env var."
+        ),
+    )
     public_link_path: str = Field(
         description="Frontend path that can be shared with clients (e.g. ?master=<slug>).",
     )
 
 
-def _to_response(master: Master) -> MeResponse:
+def _to_response(master: Master, state: AppState) -> MeResponse:
     return MeResponse(
         id=master.id,
         tg_user_id=master.tg_user_id,
@@ -39,13 +61,25 @@ def _to_response(master: Master) -> MeResponse:
         work_start_minutes=master.work_start_minutes,
         work_end_minutes=master.work_end_minutes,
         slot_step_minutes=master.slot_step_minutes,
+        is_master=master.is_master,
+        is_admin=master.is_admin,
+        admin_contact_url=state.settings.admin_contact_url,
+        become_master_conditions=state.settings.become_master_conditions,
         public_link_path=f"?master={master.slug}",
     )
 
 
 @router.get("", response_model=MeResponse)
-async def read_me(master: Master = Depends(get_current_master)) -> MeResponse:
-    return _to_response(master)
+async def read_me(
+    user: Master = Depends(get_current_user),
+    state: AppState = Depends(get_app_state),
+) -> MeResponse:
+    """Return the caller's profile + role flags.
+
+    Available to every Telegram user, master or not — the Mini App renders a
+    "become a master" landing page when ``is_master`` is false.
+    """
+    return _to_response(user, state)
 
 
 class UpdateMeRequest(BaseModel):
@@ -60,8 +94,9 @@ class UpdateMeRequest(BaseModel):
 @router.patch("", response_model=MeResponse)
 async def update_me(
     payload: UpdateMeRequest,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
+    state: AppState = Depends(get_app_state),
 ) -> MeResponse:
     if payload.display_name is not None:
         master.display_name = payload.display_name.strip() or master.display_name
@@ -89,4 +124,4 @@ async def update_me(
     if payload.slot_step_minutes is not None:
         master.slot_step_minutes = payload.slot_step_minutes
 
-    return _to_response(master)
+    return _to_response(master, state)

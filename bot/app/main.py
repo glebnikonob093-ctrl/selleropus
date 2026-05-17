@@ -15,7 +15,7 @@ from app.api import create_api_app
 from app.bot import build_dispatcher
 from app.config import Settings, load_settings
 from app.db import create_engine, create_session_factory, ensure_sqlite_dir, ping_db
-from app.migrations import create_all
+from app.migrations import create_all, seed_admins
 from app.notifications import Notifier
 from app.scheduler import start_reminder_scheduler
 
@@ -38,6 +38,7 @@ async def _run(settings: Settings) -> None:
     engine = create_engine(settings.database_url)
     await ping_db(engine)
     await create_all(engine)
+    await seed_admins(engine, settings.admin_tg_ids)
     session_factory = create_session_factory(engine)
 
     aio_session = (
