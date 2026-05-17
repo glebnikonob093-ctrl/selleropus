@@ -124,4 +124,4 @@ async def update_me(
     if payload.slot_step_minutes is not None:
         master.slot_step_minutes = payload.slot_step_minutes
 
-    return _to_response(master)
+    return _to_response(master, state)

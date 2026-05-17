@@ -293,6 +293,51 @@ async def test_admin_cannot_demote_themselves(engine: AsyncEngine) -> None:
 
 
 @pytest.mark.asyncio
+async def test_patch_me_returns_full_role_payload(engine: AsyncEngine) -> None:
+    """Regression: PATCH /api/me must pass AppState to _to_response.
+
+    Until 68358d8 the call site read ``return _to_response(master)`` and
+    crashed with ``TypeError`` because the helper signature now requires
+    ``state`` (so it can include ``admin_contact_url`` /
+    ``become_master_conditions`` from settings). This test issues a real
+    PATCH and asserts the response carries the new fields end-to-end.
+    """
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    app = create_api_app(
+        settings=_settings(admin_ids=(ADMIN_TG_ID,)),
+        session_factory=session_factory,
+        notifier=None,
+    )
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://t") as c:
+        # Promote a regular TG id so it can hit the master-gated PATCH.
+        promoted_tg_id = 9100
+        promote = await c.post(
+            "/api/admin/users",
+            headers=_auth(ADMIN_TG_ID, "boss"),
+            json={"tg_user_id": promoted_tg_id, "display_name": "Patch Me"},
+        )
+        assert promote.status_code == 201, promote.text
+
+        # Now PATCH /api/me as that user — this is the path that used to crash.
+        r = await c.patch(
+            "/api/me",
+            headers=_auth(promoted_tg_id, "patchme"),
+            json={"display_name": "Patched Name"},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["display_name"] == "Patched Name"
+        assert body["is_master"] is True
+        # The whole point of the bug: these fields are sourced from
+        # ``state.settings`` inside ``_to_response`` — if state is missing,
+        # the call crashes; if it's present, they show up here.
+        assert body["admin_contact_url"] == f"tg://user?id={ADMIN_TG_ID}"
+        assert "Pro 299" in body["become_master_conditions"]
+
+
+@pytest.mark.asyncio
 async def test_admin_can_set_user_roles(engine: AsyncEngine) -> None:
     """PATCH /api/admin/users/{id} flips is_master and is_admin flags."""
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
