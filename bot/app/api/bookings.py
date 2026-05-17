@@ -248,8 +248,10 @@ async def update_booking(
     payload: BookingUpdate,
     master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
+    app_state: AppState = Depends(get_app_state),
 ) -> BookingOut:
     booking, client, service = await _get_owned_booking(session, master, booking_id)
+    old_status = booking.status
 
     if payload.service_id is not None and payload.service_id != booking.service_id:
         res = await session.execute(
@@ -269,6 +271,27 @@ async def update_booking(
 
     booking.ends_at = booking.starts_at + timedelta(minutes=service.duration_minutes)
 
+    # If the booking is (or stays) in an active state, reject any time/service
+    # edit that would overlap with another active booking owned by the same
+    # master. ``create_booking`` already does this — without the same check
+    # here, a master can accidentally double-book themselves by dragging a
+    # booking onto an occupied slot or by switching to a longer service.
+    target_status = payload.status if payload.status is not None else booking.status
+    if target_status in ACTIVE_BOOKING_STATUSES:
+        overlap_stmt = (
+            select(Booking.id)
+            .where(Booking.master_id == master.id)
+            .where(Booking.id != booking.id)
+            .where(Booking.status.in_(ACTIVE_BOOKING_STATUSES))
+            .where(Booking.starts_at < booking.ends_at)
+            .where(Booking.ends_at > booking.starts_at)
+        )
+        overlapping = (await session.execute(overlap_stmt)).first()
+        if overlapping is not None:
+            raise HTTPException(
+                status_code=409, detail="time slot overlaps another booking"
+            )
+
     if payload.notes is not None:
         booking.notes = payload.notes or None
 
@@ -285,6 +308,23 @@ async def update_booking(
             BOOKING_STATUS_CONFIRMED,
         ):
             # do nothing extra
+            pass
+
+    # Notify the client when the master flips status to confirmed/cancelled.
+    # The notifier already handles the "client has no tg_user_id" case and
+    # swallows transport errors via _safe_send.
+    notifier = app_state.notifier
+    if notifier is not None and payload.status is not None and old_status != booking.status:
+        try:
+            await notifier.notify_status_change(  # type: ignore[attr-defined]
+                client=client,
+                booking=booking,
+                service=service,
+                master=master,
+                old_status=old_status,
+                new_status=booking.status,
+            )
+        except Exception:  # pragma: no cover - notification failures should not break update
             pass
 
     return _booking_out(booking, client, service)

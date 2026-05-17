@@ -74,6 +74,12 @@ def create_api_app(
                 )
 
             index_file = path / "index.html"
+            # Resolve the dist root once so the fallback can guarantee that
+            # every served file stays inside it. Without this guard, a
+            # request such as ``/..%2F..%2Fetc/passwd`` would coerce
+            # ``path / full_path`` into a Path that resolves outside the
+            # dist directory and FileResponse would happily stream it.
+            dist_root = path.resolve()
 
             @app.get("/", include_in_schema=False, response_model=None)
             async def _index() -> FileResponse:
@@ -87,7 +93,16 @@ def create_api_app(
             async def _spa_fallback(full_path: str) -> FileResponse | JSONResponse:
                 if full_path.startswith("api/"):
                     return JSONResponse({"detail": "not found"}, status_code=404)
-                target = path / full_path
+                # Reject any path that tries to escape the dist root. We
+                # check both the textual form (cheap, catches the obvious
+                # cases) and the resolved form (defends against symlink
+                # tricks and tricky percent-decoded input).
+                try:
+                    target = (path / full_path).resolve()
+                except (OSError, RuntimeError):
+                    return FileResponse(str(index_file))
+                if dist_root not in target.parents and target != dist_root:
+                    return FileResponse(str(index_file))
                 if target.is_file():
                     return FileResponse(str(target))
                 return FileResponse(str(index_file))
