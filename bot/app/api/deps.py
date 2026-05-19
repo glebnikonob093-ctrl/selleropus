@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -14,21 +16,35 @@ from app.config import Settings
 from app.models import Master
 from app.repos import get_master_by_tg_id, upsert_master_from_initdata
 
+if TYPE_CHECKING:
+    from app.notifications import Notifier
+
 # Process-wide locks keyed by tg_user_id that serialize the very first
 # "find-or-create master" call across parallel Mini App requests. The lock
-# is created lazily on first use and never released to the global dict — in
-# practice there is one entry per active user, which is bounded by the
-# number of users who have ever opened the Mini App in this process. Once
-# the master row exists the lock is taken only briefly (just long enough to
-# re-check the row), so steady-state cost is negligible.
-_master_create_locks: dict[int, asyncio.Lock] = {}
+# is created lazily on first use and held in a small LRU so the dict can't
+# grow without bound on an instance that gets pounded by many distinct
+# users. Once a master row exists the lock is taken only briefly (just
+# long enough to re-check the row), so steady-state cost is negligible and
+# evicting an old entry is harmless — a fresh lock for the same user just
+# means re-serialising any new concurrent first-time call, which is the
+# baseline behaviour anyway.
+_LOCK_CAP = 4096
+_master_create_locks: OrderedDict[int, asyncio.Lock] = OrderedDict()
 
 
 def _lock_for(tg_user_id: int) -> asyncio.Lock:
     lock = _master_create_locks.get(tg_user_id)
-    if lock is None:
-        lock = asyncio.Lock()
-        _master_create_locks[tg_user_id] = lock
+    if lock is not None:
+        _master_create_locks.move_to_end(tg_user_id)
+        return lock
+    lock = asyncio.Lock()
+    _master_create_locks[tg_user_id] = lock
+    if len(_master_create_locks) > _LOCK_CAP:
+        # Evict the oldest entry. Any coroutine currently holding an
+        # ``async with`` keeps a strong reference, so eviction only
+        # detaches the dict slot — the lock object itself survives for
+        # in-flight waiters.
+        _master_create_locks.popitem(last=False)
     return lock
 
 
@@ -36,7 +52,7 @@ def _lock_for(tg_user_id: int) -> asyncio.Lock:
 class AppState:
     settings: Settings
     session_factory: async_sessionmaker[AsyncSession]
-    notifier: object | None  # forward ref to Notifier; kept untyped to avoid cycle
+    notifier: Notifier | None
 
 
 def get_app_state(request: Request) -> AppState:

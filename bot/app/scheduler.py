@@ -68,27 +68,36 @@ async def _send_client_reminders(
     target_end = target_start + timedelta(minutes=window_minutes)
 
     async with session_scope(session_factory) as session:
+        # Filter out bookings that already have a ``ReminderState`` of this
+        # ``kind`` in a single LEFT JOIN, instead of issuing one
+        # ``SELECT ReminderState WHERE booking_id = ?`` per booking. Without
+        # this, every reminder tick scaled O(N) round-trips against bookings
+        # in the upcoming window — a busy salon could trivially stall the
+        # scheduler for tens of seconds on Postgres.
+        already_subq = (
+            select(ReminderState.booking_id)
+            .where(ReminderState.kind == kind)
+            .subquery()
+        )
         stmt = (
             select(Booking, Client, Service, Master)
             .join(Client, Client.id == Booking.client_id)
             .join(Service, Service.id == Booking.service_id)
             .join(Master, Master.id == Booking.master_id)
+            .outerjoin(
+                already_subq, already_subq.c.booking_id == Booking.id
+            )
             .where(Booking.status.in_(ACTIVE_BOOKING_STATUSES))
             .where(Booking.starts_at >= target_start)
             .where(Booking.starts_at < target_end)
+            .where(already_subq.c.booking_id.is_(None))
         )
         rows = list((await session.execute(stmt)).all())
 
         for booking, client, service, master in rows:
-            already = await session.execute(
-                select(ReminderState.id).where(
-                    ReminderState.booking_id == booking.id,
-                    ReminderState.kind == kind,
-                )
-            )
-            if already.scalar_one_or_none() is not None:
-                continue
-
+            # ``_mark_sent`` is still the race-safe gate: if another worker
+            # inserted the ReminderState between our SELECT and INSERT it
+            # raises IntegrityError and we move on.
             if not await _mark_sent(session, booking.id, kind):
                 continue
 

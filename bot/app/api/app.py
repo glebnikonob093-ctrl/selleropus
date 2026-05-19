@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,21 +20,36 @@ from app.api.services import router as services_router
 from app.api.stats import router as stats_router
 from app.config import Settings
 
+if TYPE_CHECKING:
+    from app.notifications import Notifier
+
+
+# Localhost-only origins enabled during local Vite dev (``npm run dev``).
+# In production the Mini App is served from the same Railway origin as the
+# API or from a configured ``WEBAPP_URL``, so localhost has no business
+# being on the allow-list — it's a small but real surface area for any
+# attacker who can run code on the user's machine (e.g. a malicious
+# extension hosting localhost:5173).
+_DEV_ORIGINS: tuple[str, ...] = (
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+)
+
 
 def _resolve_origins(settings: Settings) -> list[str]:
-    candidates: Iterable[str] = (
-        settings.webapp_url,
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-    )
-    return [c for c in (s.strip() for s in candidates) if c]
+    webapp_url = settings.webapp_url.strip()
+    if webapp_url:
+        # Production: a deployed front-end is configured, only allow that.
+        return [webapp_url]
+    # Local dev: no deployed front-end configured, allow Vite dev server.
+    return list(_DEV_ORIGINS)
 
 
 def create_api_app(
     *,
     settings: Settings,
     session_factory: async_sessionmaker[AsyncSession],
-    notifier: object | None = None,
+    notifier: Notifier | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Clientika API", version="0.1.0")
 

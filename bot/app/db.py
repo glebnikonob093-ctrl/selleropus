@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -11,6 +12,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+log = logging.getLogger(__name__)
 
 
 def _unicode_lower(value: object) -> object:
@@ -49,8 +52,14 @@ def create_engine(database_url: str) -> AsyncEngine:
                 raw.create_function("lower", 1, _unicode_lower)
             except Exception:
                 # If create_function isn't available we leave the default
-                # ASCII-only LOWER in place — ilike will still work for ASCII.
-                pass
+                # ASCII-only LOWER in place — ilike will still work for
+                # ASCII. Log loudly so the next time a user complains that
+                # search "doesn't find Иван by иван" we have a breadcrumb.
+                log.warning(
+                    "sqlite create_function('lower') failed — "
+                    "Cyrillic ILIKE will fall back to ASCII-only matching",
+                    exc_info=True,
+                )
 
     return engine
 
