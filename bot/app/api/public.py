@@ -214,7 +214,7 @@ async def create_public_booking(
     notifier = app_state.notifier
     if notifier is not None:
         try:
-            await notifier.notify_master_new_booking(  # type: ignore[attr-defined]
+            await notifier.notify_master_new_booking(
                 master=master, booking=booking, client=client, service=service
             )
         except Exception:  # pragma: no cover - notification failures should not break booking

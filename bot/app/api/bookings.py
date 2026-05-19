@@ -325,7 +325,7 @@ async def update_booking(
     notifier = app_state.notifier
     if notifier is not None and payload.status is not None and old_status != booking.status:
         try:
-            await notifier.notify_status_change(  # type: ignore[attr-defined]
+            await notifier.notify_status_change(
                 client=client,
                 booking=booking,
                 service=service,

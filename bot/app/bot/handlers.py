@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiogram import Dispatcher, F, Router
 from aiogram.filters import Command, CommandStart
@@ -46,6 +47,7 @@ BTN_OPEN_APP = "📱 Открыть Clientika"
 BTN_PROFILE = "👤 Мой профиль"
 BTN_HELP = "❓ Помощь"
 BTN_BECOME_MASTER = "✨ Стать мастером"
+BTN_ADMIN_PANEL = "🛡 Админка"
 
 
 def _public_link(settings: Settings, master: Master) -> str:
@@ -55,11 +57,28 @@ def _public_link(settings: Settings, master: Master) -> str:
     return f"{base}?{urlencode({'master': master.slug})}"
 
 
-def _main_reply_keyboard() -> ReplyKeyboardMarkup:
+def _main_reply_keyboard(master: Master | None = None) -> ReplyKeyboardMarkup:
+    """Persistent reply keyboard, role-aware.
+
+    * Anyone sees "Open / Profile / Help".
+    * Admins additionally get a "🛡 Админка" shortcut to ``/admin``.
+    * Regular (non-master, non-admin) users get "✨ Стать мастером".
+    * Plain masters (no admin flag) get the minimal three-button layout.
+
+    A ``None`` master means "we don't know the role yet" — use the same
+    minimal layout for masters so the original onboarding flow keeps
+    working when callers haven't fetched the user record.
+    """
+    third_row: list[KeyboardButton] = [KeyboardButton(text=BTN_HELP)]
+    if master is not None:
+        if master.is_admin:
+            third_row.append(KeyboardButton(text=BTN_ADMIN_PANEL))
+        elif not master.is_master:
+            third_row.append(KeyboardButton(text=BTN_BECOME_MASTER))
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_OPEN_APP), KeyboardButton(text=BTN_PROFILE)],
-            [KeyboardButton(text=BTN_HELP)],
+            third_row,
         ],
         resize_keyboard=True,
         is_persistent=True,
@@ -224,7 +243,7 @@ def build_dispatcher(
             )
         await message.answer(
             text,
-            reply_markup=_main_reply_keyboard(),
+            reply_markup=_main_reply_keyboard(user),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
@@ -254,6 +273,10 @@ def build_dispatcher(
     @router.message(F.text == BTN_BECOME_MASTER)
     async def on_become_master_button(message: Message) -> None:
         await on_become_master_cmd(message)
+
+    @router.message(F.text == BTN_ADMIN_PANEL)
+    async def on_admin_button(message: Message) -> None:
+        await on_admin(message)
 
     @router.message(F.text == BTN_OPEN_APP)
     async def on_open_app_button(message: Message) -> None:
@@ -316,7 +339,14 @@ def build_dispatcher(
             )
             return
         async with session_scope(session_factory) as session:
-            now = datetime.utcnow()
+            # Anchor "today" to the master's local wall clock, not the
+            # server's UTC. Without this a Moscow master at 02:00 local
+            # (= 23:00 UTC previous day) saw the previous UTC day's records.
+            try:
+                tz = ZoneInfo(master.timezone or "UTC")
+            except ZoneInfoNotFoundError:
+                tz = ZoneInfo("UTC")
+            now = datetime.now(tz).replace(tzinfo=None)
             day_start = datetime(now.year, now.month, now.day)
             day_end = day_start + timedelta(days=1)
             stmt = (
@@ -369,7 +399,7 @@ def build_dispatcher(
             lines.append("/admin — открыть админ-панель")
         await message.answer(
             "\n".join(lines),
-            reply_markup=_main_reply_keyboard(),
+            reply_markup=_main_reply_keyboard(master),
         )
 
     @router.message(F.web_app_data)

@@ -4,7 +4,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_master, get_session
@@ -168,5 +168,21 @@ async def delete_client(
     session: AsyncSession = Depends(get_session),
 ) -> Response:
     client = await _get_owned_client(session, master, client_id)
+    # Bookings reference the client via NOT NULL FK and don't cascade on
+    # delete, so a raw ``session.delete(client)`` here would 500 with an
+    # IntegrityError on flush. Reject with 409 so the Mini App can show a
+    # human-readable explanation; the master can still delete the bookings
+    # first if they really want the client gone. We deliberately don't
+    # cascade-delete because the booking history feeds revenue stats.
+    count_q = select(func.count(Booking.id)).where(Booking.client_id == client.id)
+    booking_count = int((await session.execute(count_q)).scalar_one() or 0)
+    if booking_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"client has {booking_count} booking(s) — "
+                "delete or cancel them first"
+            ),
+        )
     await session.delete(client)
     return Response(status_code=204)

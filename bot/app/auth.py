@@ -51,7 +51,18 @@ def parse_init_data(
     if not bot_token:
         raise InitDataError("bot token is not configured")
 
-    pairs = dict(parse_qsl(init_data, keep_blank_values=True))
+    # parse_qsl returns ``list[tuple[str, str]]`` — wrapping that in ``dict()``
+    # would silently drop every duplicate key, which is exactly what an
+    # attacker would exploit to smuggle a forged value past the hash check
+    # (e.g. send ``hash=A&user=evil&user=victim``: ``dict()`` would keep
+    # ``user=victim`` for the hash recomputation while the request-as-a-whole
+    # actually carried ``evil``). Reject duplicates outright.
+    pair_list = parse_qsl(init_data, keep_blank_values=True)
+    pairs: dict[str, str] = {}
+    for key, value in pair_list:
+        if key in pairs:
+            raise InitDataError(f"duplicate key in initData: {key}")
+        pairs[key] = value
     received_hash = pairs.pop("hash", "")
     if not received_hash:
         raise InitDataError("hash is missing")
