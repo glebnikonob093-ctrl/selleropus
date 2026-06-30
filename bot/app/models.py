@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     ForeignKey,
     Integer,
@@ -159,4 +160,23 @@ class ReminderState(Base):
 
     __table_args__ = (
         UniqueConstraint("booking_id", "kind", name="uq_reminder_booking_kind"),
+    )
+
+
+class MasterDailySummary(Base):
+    """One row per (master, calendar day) marking the morning summary as sent.
+
+    Keyed on the master and the day rather than a booking, so a master with no
+    bookings is still marked once per day and greeted exactly once.
+    """
+
+    __tablename__ = "master_daily_summaries"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    day: Mapped[date] = mapped_column(Date, index=True)
+    sent_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "day", name="uq_master_daily_summary"),
     )
