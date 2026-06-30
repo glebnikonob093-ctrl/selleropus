@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -75,7 +75,7 @@ async def get_public_master(
 async def get_availability(
     slug: str,
     service_id: int,
-    day_str: str = Field(..., description="ISO date YYYY-MM-DD", alias="date"),
+    day_str: str = Query(..., description="ISO date YYYY-MM-DD", alias="date"),
     session: AsyncSession = Depends(get_session),
 ) -> list[datetime]:
     master = await get_master_by_slug(session, slug)

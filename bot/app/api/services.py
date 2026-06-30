@@ -105,7 +105,7 @@ async def update_service(
     return ServiceOut.from_model(svc)
 
 
-@router.delete("/{service_id}", status_code=204)
+@router.delete("/{service_id}", status_code=204, response_model=None)
 async def delete_service(
     service_id: int,
     master: Master = Depends(get_current_master),
