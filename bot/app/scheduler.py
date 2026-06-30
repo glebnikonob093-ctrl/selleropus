@@ -38,13 +38,15 @@ REMINDER_CLIENT_2H = "client_2h"
 
 
 async def _mark_sent(session: AsyncSession, booking_id: int, kind: str) -> bool:
-    state = ReminderState(booking_id=booking_id, kind=kind)
-    session.add(state)
+    # SAVEPOINT so a duplicate-reminder conflict (concurrent tick) only discards
+    # this insert and not ReminderState rows already flushed for earlier bookings
+    # in the shared transaction.
     try:
-        await session.flush()
+        async with session.begin_nested():
+            session.add(ReminderState(booking_id=booking_id, kind=kind))
+            await session.flush()
         return True
     except IntegrityError:
-        await session.rollback()
         return False
 
 
