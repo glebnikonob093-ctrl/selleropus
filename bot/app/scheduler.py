@@ -38,13 +38,15 @@ REMINDER_CLIENT_2H = "client_2h"
 
 
 async def _mark_sent(session: AsyncSession, booking_id: int, kind: str) -> bool:
-    state = ReminderState(booking_id=booking_id, kind=kind)
-    session.add(state)
+    # SAVEPOINT so a duplicate-reminder conflict (concurrent tick) only discards
+    # this insert and not ReminderState rows already flushed for earlier bookings
+    # in the shared transaction.
     try:
-        await session.flush()
+        async with session.begin_nested():
+            session.add(ReminderState(booking_id=booking_id, kind=kind))
+            await session.flush()
         return True
     except IntegrityError:
-        await session.rollback()
         return False
 
 
@@ -88,11 +90,8 @@ async def _send_client_reminders(
             if already.scalar_one_or_none() is not None:
                 continue
 
-            if not await _mark_sent(session, booking.id, kind):
-                continue
-
             try:
-                await notifier.notify_client_reminder(
+                delivered = await notifier.notify_client_reminder(
                     client=client,
                     booking=booking,
                     service=service,
@@ -101,6 +100,13 @@ async def _send_client_reminders(
                 )
             except Exception:  # pragma: no cover - log and continue
                 log.exception("reminder_send_failed booking_id=%s kind=%s", booking.id, kind)
+                continue
+
+            # Mark only after a confirmed delivery so a failed send (including a
+            # swallowed Telegram error, where `delivered` is False) is retried on
+            # a later tick within the window instead of being recorded as sent.
+            if delivered:
+                await _mark_sent(session, booking.id, kind)
 
 
 async def _send_morning_summaries(
@@ -148,22 +154,28 @@ async def _send_morning_summaries(
             todays = [tuple(row) for row in (await session.execute(stmt)).all()]
 
             try:
-                await notifier.notify_master_morning_summary(
+                delivered = await notifier.notify_master_morning_summary(
                     master=master,
                     bookings=todays,  # type: ignore[arg-type]
                 )
             except Exception:  # pragma: no cover
                 log.exception("morning_summary_failed master_id=%s", master.id)
                 continue
+            if not delivered:
+                # Swallowed Telegram error: leave unmarked so a later tick within
+                # the morning window retries instead of recording it as sent.
+                continue
 
-            # Record the send only after a successful notify so a failure is
-            # retried on a later tick within the morning window.
-            marker = MasterDailySummary(master_id=master.id, day=today)
-            session.add(marker)
+            # Record the send only after a confirmed delivery. Use a SAVEPOINT so a
+            # duplicate-marker conflict (concurrent tick) only discards this
+            # master's insert and not markers already flushed for earlier masters
+            # in the shared transaction.
             try:
-                await session.flush()
+                async with session.begin_nested():
+                    session.add(MasterDailySummary(master_id=master.id, day=today))
+                    await session.flush()
             except IntegrityError:  # pragma: no cover - concurrent tick
-                await session.rollback()
+                pass
 
 
 async def run_reminder_tick(
