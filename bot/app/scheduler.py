@@ -25,6 +25,7 @@ from app.models import (
     Booking,
     Client,
     Master,
+    MasterDailySummary,
     ReminderState,
     Service,
 )
@@ -34,7 +35,6 @@ log = logging.getLogger(__name__)
 
 REMINDER_CLIENT_24H = "client_24h"
 REMINDER_CLIENT_2H = "client_2h"
-REMINDER_MASTER_MORNING = "master_morning"
 
 
 async def _mark_sent(session: AsyncSession, booking_id: int, kind: str) -> bool:
@@ -116,19 +116,20 @@ async def _send_morning_summaries(
     if not (now.hour == 8 and now.minute < 15):
         return
 
+    today = now.date()
+    day_start = datetime(now.year, now.month, now.day)
+    day_end = day_start + timedelta(days=1)
+
     async with session_scope(session_factory) as session:
         masters = list((await session.execute(select(Master))).scalars())
 
         for master in masters:
-            day_start = datetime(now.year, now.month, now.day)
-            day_end = day_start + timedelta(days=1)
-            sentinel_kind = f"{REMINDER_MASTER_MORNING}:{day_start.date().isoformat()}"
-
+            # Per-master, per-day idempotency. Keyed on the day rather than a
+            # booking row so masters with no bookings are still greeted once.
             already_q = await session.execute(
-                select(ReminderState.id)
-                .join(Booking, Booking.id == ReminderState.booking_id)
-                .where(Booking.master_id == master.id)
-                .where(ReminderState.kind == sentinel_kind)
+                select(MasterDailySummary.id)
+                .where(MasterDailySummary.master_id == master.id)
+                .where(MasterDailySummary.day == today)
                 .limit(1)
             )
             if already_q.scalar_one_or_none() is not None:
@@ -146,12 +147,6 @@ async def _send_morning_summaries(
             )
             todays = [tuple(row) for row in (await session.execute(stmt)).all()]
 
-            # Idempotency is recorded against a booking row, so a day with no
-            # bookings cannot be marked as "sent". Skip it to avoid re-sending
-            # an empty summary on every tick within the morning window.
-            if not todays:
-                continue
-
             try:
                 await notifier.notify_master_morning_summary(
                     master=master,
@@ -161,8 +156,14 @@ async def _send_morning_summaries(
                 log.exception("morning_summary_failed master_id=%s", master.id)
                 continue
 
-            first_booking_id = todays[0][0].id
-            await _mark_sent(session, first_booking_id, sentinel_kind)
+            # Record the send only after a successful notify so a failure is
+            # retried on a later tick within the morning window.
+            marker = MasterDailySummary(master_id=master.id, day=today)
+            session.add(marker)
+            try:
+                await session.flush()
+            except IntegrityError:  # pragma: no cover - concurrent tick
+                await session.rollback()
 
 
 async def run_reminder_tick(
