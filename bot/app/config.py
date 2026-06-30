@@ -28,6 +28,7 @@ def _parse_hhmm(raw: str, default: tuple[int, int]) -> tuple[int, int]:
 @dataclass(frozen=True)
 class Settings:
     bot_token: str
+    bot_username: str
     database_url: str
     api_host: str
     api_port: int
@@ -48,6 +49,7 @@ def load_settings() -> Settings:
 
     return Settings(
         bot_token=bot_token,
+        bot_username=os.getenv("BOT_USERNAME", "").strip().lstrip("@"),
         database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db"),
         api_host=os.getenv("API_HOST", "127.0.0.1"),
         api_port=_get_int("API_PORT", 8000),

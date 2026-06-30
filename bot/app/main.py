@@ -52,7 +52,20 @@ async def _run(settings: Settings) -> None:
     )
     notifier = Notifier(bot)
 
-    dispatcher = build_dispatcher(settings=settings, session_factory=session_factory)
+    bot_username = settings.bot_username
+    if not bot_username:
+        try:
+            me = await bot.get_me()
+            bot_username = me.username or ""
+        except Exception:  # pragma: no cover - network/startup hiccup
+            log.warning("get_me_failed; deep links will be unavailable")
+
+    dispatcher = build_dispatcher(
+        settings=settings,
+        session_factory=session_factory,
+        notifier=notifier,
+        bot_username=bot_username,
+    )
 
     api_app = create_api_app(
         settings=settings,
