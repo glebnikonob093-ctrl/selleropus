@@ -146,6 +146,12 @@ async def _send_morning_summaries(
             )
             todays = [tuple(row) for row in (await session.execute(stmt)).all()]
 
+            # Idempotency is recorded against a booking row, so a day with no
+            # bookings cannot be marked as "sent". Skip it to avoid re-sending
+            # an empty summary on every tick within the morning window.
+            if not todays:
+                continue
+
             try:
                 await notifier.notify_master_morning_summary(
                     master=master,
@@ -155,9 +161,8 @@ async def _send_morning_summaries(
                 log.exception("morning_summary_failed master_id=%s", master.id)
                 continue
 
-            if todays:
-                first_booking_id = todays[0][0].id
-                await _mark_sent(session, first_booking_id, sentinel_kind)
+            first_booking_id = todays[0][0].id
+            await _mark_sent(session, first_booking_id, sentinel_kind)
 
 
 async def run_reminder_tick(

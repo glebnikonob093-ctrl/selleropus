@@ -11,10 +11,7 @@ from app.api.deps import AppState, get_app_state, get_current_master, get_sessio
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
     BOOKING_STATUS_CAME,
-    BOOKING_STATUS_CANCELLED,
     BOOKING_STATUS_CONFIRMED,
-    BOOKING_STATUS_NEW,
-    BOOKING_STATUS_NO_SHOW,
     BOOKING_STATUSES,
     Booking,
     Client,
@@ -248,8 +245,10 @@ async def update_booking(
     payload: BookingUpdate,
     master: Master = Depends(get_current_master),
     session: AsyncSession = Depends(get_session),
+    app_state: AppState = Depends(get_app_state),
 ) -> BookingOut:
     booking, client, service = await _get_owned_booking(session, master, booking_id)
+    old_status = booking.status
 
     if payload.service_id is not None and payload.service_id != booking.service_id:
         res = await session.execute(
@@ -278,19 +277,27 @@ async def update_booking(
         booking.status = payload.status
         if payload.status == BOOKING_STATUS_CAME:
             client.last_visit_at = booking.ends_at
-        elif payload.status in (
-            BOOKING_STATUS_CANCELLED,
-            BOOKING_STATUS_NO_SHOW,
-            BOOKING_STATUS_NEW,
-            BOOKING_STATUS_CONFIRMED,
-        ):
-            # do nothing extra
+
+    await session.flush()
+
+    notifier = app_state.notifier
+    if notifier is not None and payload.status is not None and payload.status != old_status:
+        try:
+            await notifier.notify_status_change(  # type: ignore[attr-defined]
+                client=client,
+                booking=booking,
+                service=service,
+                master=master,
+                old_status=old_status,
+                new_status=booking.status,
+            )
+        except Exception:  # pragma: no cover - notification failures must not break updates
             pass
 
     return _booking_out(booking, client, service)
 
 
-@router.delete("/{booking_id}", status_code=204)
+@router.delete("/{booking_id}", status_code=204, response_model=None)
 async def delete_booking(
     booking_id: int,
     master: Master = Depends(get_current_master),
