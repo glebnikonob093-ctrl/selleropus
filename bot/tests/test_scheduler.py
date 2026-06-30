@@ -13,6 +13,7 @@ from app.models import (
     Client,
     Master,
     MasterDailySummary,
+    ReminderState,
     Service,
 )
 
@@ -128,3 +129,107 @@ async def test_already_greeted_master_skipped_others_still_greeted(
     assert notifier.greeted_master_ids == [pending_id]
     assert done_id not in notifier.greeted_master_ids
     assert await _count_markers(session_factory) == 2
+
+
+class _ClientReminderNotifier:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.sent_booking_ids: list[int] = []
+
+    async def notify_client_reminder(
+        self, *, client, booking, service, master, hours_until
+    ) -> None:
+        self.sent_booking_ids.append(booking.id)
+        if self.fail:
+            raise RuntimeError("send failed")
+
+
+async def _count_reminder_states(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        return (await session.execute(select(func.count()).select_from(ReminderState))).scalar_one()
+
+
+async def _make_booking_in_24h_window(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> int:
+    async with session_factory() as session:
+        master = await _make_master(session, tg_user_id=950, slug="rem")
+        service = Service(master_id=master.id, name="Cut", price=1000, duration_minutes=60)
+        session.add(service)
+        client = Client(master_id=master.id, name="Bob")
+        session.add(client)
+        await session.flush()
+        # Frozen now is 2026-06-30 08:05; 24h window is [+24h, +24h+60m).
+        start = datetime(2026, 7, 1, 8, 30)
+        booking = Booking(
+            master_id=master.id,
+            client_id=client.id,
+            service_id=service.id,
+            starts_at=start,
+            ends_at=start + timedelta(hours=1),
+            status=BOOKING_STATUS_NEW,
+            price_snapshot=1000,
+        )
+        session.add(booking)
+        await session.commit()
+        return booking.id
+
+
+async def test_client_reminder_marked_after_successful_send(
+    session_factory: async_sessionmaker[AsyncSession], _freeze_morning: None
+) -> None:
+    await _make_booking_in_24h_window(session_factory)
+    notifier = _ClientReminderNotifier()
+
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        notifier,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(notifier.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 1
+
+    # Second tick within the window must not re-send.
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        notifier,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(notifier.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 1
+
+
+async def test_client_reminder_failed_send_is_retried(
+    session_factory: async_sessionmaker[AsyncSession], _freeze_morning: None
+) -> None:
+    await _make_booking_in_24h_window(session_factory)
+
+    # A failed delivery must NOT be recorded as sent.
+    failing = _ClientReminderNotifier(fail=True)
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        failing,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(failing.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 0
+
+    # A later tick retries and, on success, records exactly one marker.
+    ok = _ClientReminderNotifier()
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        ok,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(ok.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 1

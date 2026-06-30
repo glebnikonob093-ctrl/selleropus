@@ -90,9 +90,6 @@ async def _send_client_reminders(
             if already.scalar_one_or_none() is not None:
                 continue
 
-            if not await _mark_sent(session, booking.id, kind):
-                continue
-
             try:
                 await notifier.notify_client_reminder(
                     client=client,
@@ -103,6 +100,11 @@ async def _send_client_reminders(
                 )
             except Exception:  # pragma: no cover - log and continue
                 log.exception("reminder_send_failed booking_id=%s kind=%s", booking.id, kind)
+                continue
+
+            # Mark only after a successful send so a failed delivery is retried
+            # on a later tick instead of being permanently recorded as sent.
+            await _mark_sent(session, booking.id, kind)
 
 
 async def _send_morning_summaries(
