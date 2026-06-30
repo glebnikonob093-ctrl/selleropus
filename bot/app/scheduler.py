@@ -91,7 +91,7 @@ async def _send_client_reminders(
                 continue
 
             try:
-                await notifier.notify_client_reminder(
+                delivered = await notifier.notify_client_reminder(
                     client=client,
                     booking=booking,
                     service=service,
@@ -102,9 +102,11 @@ async def _send_client_reminders(
                 log.exception("reminder_send_failed booking_id=%s kind=%s", booking.id, kind)
                 continue
 
-            # Mark only after a successful send so a failed delivery is retried
-            # on a later tick instead of being permanently recorded as sent.
-            await _mark_sent(session, booking.id, kind)
+            # Mark only after a confirmed delivery so a failed send (including a
+            # swallowed Telegram error, where `delivered` is False) is retried on
+            # a later tick within the window instead of being recorded as sent.
+            if delivered:
+                await _mark_sent(session, booking.id, kind)
 
 
 async def _send_morning_summaries(

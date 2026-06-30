@@ -132,16 +132,18 @@ async def test_already_greeted_master_skipped_others_still_greeted(
 
 
 class _ClientReminderNotifier:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(self, *, fail: bool = False, delivered: bool = True) -> None:
         self.fail = fail
+        self.delivered = delivered
         self.sent_booking_ids: list[int] = []
 
     async def notify_client_reminder(
         self, *, client, booking, service, master, hours_until
-    ) -> None:
+    ) -> bool:
         self.sent_booking_ids.append(booking.id)
         if self.fail:
             raise RuntimeError("send failed")
+        return self.delivered
 
 
 async def _count_reminder_states(
@@ -223,6 +225,36 @@ async def test_client_reminder_failed_send_is_retried(
     assert await _count_reminder_states(session_factory) == 0
 
     # A later tick retries and, on success, records exactly one marker.
+    ok = _ClientReminderNotifier()
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        ok,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(ok.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 1
+
+
+async def test_client_reminder_undelivered_send_is_retried(
+    session_factory: async_sessionmaker[AsyncSession], _freeze_morning: None
+) -> None:
+    await _make_booking_in_24h_window(session_factory)
+
+    # A swallowed Telegram error surfaces as delivered=False -> not marked.
+    undelivered = _ClientReminderNotifier(delivered=False)
+    await scheduler._send_client_reminders(  # type: ignore[arg-type]
+        session_factory,
+        undelivered,
+        kind=scheduler.REMINDER_CLIENT_24H,
+        hours_until=24,
+        window_minutes=60,
+    )
+    assert len(undelivered.sent_booking_ids) == 1
+    assert await _count_reminder_states(session_factory) == 0
+
+    # A later tick delivers and records exactly one marker.
     ok = _ClientReminderNotifier()
     await scheduler._send_client_reminders(  # type: ignore[arg-type]
         session_factory,

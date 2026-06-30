@@ -41,11 +41,14 @@ class Notifier:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
 
-    async def _safe_send(self, chat_id: int, text: str) -> None:
+    async def _safe_send(self, chat_id: int, text: str) -> bool:
+        """Send a message, swallowing Telegram errors. Returns True iff delivered."""
         try:
             await self.bot.send_message(chat_id, text, disable_web_page_preview=True)
+            return True
         except TelegramAPIError as exc:
             log.warning("notifier_send_failed chat_id=%s error=%s", chat_id, exc)
+            return False
 
     async def notify_master_new_booking(
         self,
@@ -128,16 +131,21 @@ class Notifier:
         service: Service,
         master: Master,
         hours_until: int,
-    ) -> None:
+    ) -> bool:
+        """Returns True if the reminder was delivered (or there's nothing to send).
+
+        The scheduler uses this to decide whether to record the reminder as sent;
+        a False result lets it retry on a later tick within the reminder window.
+        """
         if not client.tg_user_id:
-            return
+            return True
         when = _format_local(booking.starts_at)
         if hours_until >= 24:
             head = f"⏰ Напоминание: завтра в {booking.starts_at.strftime('%H:%M')} запись"
         else:
             head = f"⏰ Напоминание: через {hours_until} ч запись"
         text = f"{head} к {master.display_name}\nУслуга: {service.name}\nКогда: {when}"
-        await self._safe_send(client.tg_user_id, text)
+        return await self._safe_send(client.tg_user_id, text)
 
     async def notify_master_morning_summary(
         self,
@@ -150,8 +158,6 @@ class Notifier:
         else:
             lines = [f"☕️ Доброе утро! Сегодня {len(bookings)} запис(ей):"]
             for b, c, s in bookings:
-                lines.append(
-                    f"• {b.starts_at.strftime('%H:%M')} — {s.name} — {_client_label(c)}"
-                )
+                lines.append(f"• {b.starts_at.strftime('%H:%M')} — {s.name} — {_client_label(c)}")
             text = "\n".join(lines)
         await self._safe_send(master.tg_chat_id, text)
