@@ -154,17 +154,20 @@ async def _send_morning_summaries(
             todays = [tuple(row) for row in (await session.execute(stmt)).all()]
 
             try:
-                await notifier.notify_master_morning_summary(
+                delivered = await notifier.notify_master_morning_summary(
                     master=master,
                     bookings=todays,  # type: ignore[arg-type]
                 )
             except Exception:  # pragma: no cover
                 log.exception("morning_summary_failed master_id=%s", master.id)
                 continue
+            if not delivered:
+                # Swallowed Telegram error: leave unmarked so a later tick within
+                # the morning window retries instead of recording it as sent.
+                continue
 
-            # Record the send only after a successful notify so a failure is
-            # retried on a later tick within the morning window. Use a SAVEPOINT
-            # so a duplicate-marker conflict (concurrent tick) only discards this
+            # Record the send only after a confirmed delivery. Use a SAVEPOINT so a
+            # duplicate-marker conflict (concurrent tick) only discards this
             # master's insert and not markers already flushed for earlier masters
             # in the shared transaction.
             try:

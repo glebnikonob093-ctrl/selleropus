@@ -19,13 +19,15 @@ from app.models import (
 
 
 class _RecordingNotifier:
-    def __init__(self) -> None:
+    def __init__(self, *, delivered: bool = True) -> None:
+        self.delivered = delivered
         self.morning_calls: list[list] = []
         self.greeted_master_ids: list[int] = []
 
-    async def notify_master_morning_summary(self, *, master, bookings) -> None:
+    async def notify_master_morning_summary(self, *, master, bookings) -> bool:
         self.morning_calls.append(list(bookings))
         self.greeted_master_ids.append(master.id)
+        return self.delivered
 
 
 class _FrozenDatetime(datetime):
@@ -129,6 +131,26 @@ async def test_already_greeted_master_skipped_others_still_greeted(
     assert notifier.greeted_master_ids == [pending_id]
     assert done_id not in notifier.greeted_master_ids
     assert await _count_markers(session_factory) == 2
+
+
+async def test_morning_greeting_not_marked_when_delivery_fails(
+    session_factory: async_sessionmaker[AsyncSession], _freeze_morning: None
+) -> None:
+    async with session_factory() as session:
+        await _make_master(session, tg_user_id=910, slug="blocked")
+        await session.commit()
+
+    # Swallowed Telegram error -> delivered=False -> not marked, retried later.
+    failing = _RecordingNotifier(delivered=False)
+    await scheduler._send_morning_summaries(session_factory, failing)  # type: ignore[arg-type]
+    assert len(failing.morning_calls) == 1
+    assert await _count_markers(session_factory) == 0
+
+    # A later tick delivers and marks the day exactly once.
+    ok = _RecordingNotifier()
+    await scheduler._send_morning_summaries(session_factory, ok)  # type: ignore[arg-type]
+    assert len(ok.morning_calls) == 1
+    assert await _count_markers(session_factory) == 1
 
 
 class _ClientReminderNotifier:

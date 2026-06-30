@@ -152,7 +152,9 @@ class Notifier:
         *,
         master: Master,
         bookings: list[tuple[Booking, Client, Service]],
-    ) -> None:
+    ) -> bool:
+        """Returns True if the summary was delivered, so the scheduler only marks
+        the day done on success and retries a failed send on a later tick."""
         if not bookings:
             text = "☕️ Доброе утро! На сегодня записей нет."
         else:
@@ -160,4 +162,4 @@ class Notifier:
             for b, c, s in bookings:
                 lines.append(f"• {b.starts_at.strftime('%H:%M')} — {s.name} — {_client_label(c)}")
             text = "\n".join(lines)
-        await self._safe_send(master.tg_chat_id, text)
+        return await self._safe_send(master.tg_chat_id, text)
