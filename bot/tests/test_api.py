@@ -146,6 +146,29 @@ def test_status_change_notifies(client: TestClient, notifier: _RecordingNotifier
     assert notifier.status_changes == [("new", "cancelled")]
 
 
+def test_app_builds_and_serves_spa_with_dist_dir(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path
+) -> None:
+    # Regression: when WEBAPP_DIST_DIR is set (as in the Docker image), the SPA
+    # index/fallback routes are registered. Their `FileResponse` /
+    # `FileResponse | JSONResponse` return annotations used to make FastAPI try
+    # to build a response model and crash app construction at startup.
+    (tmp_path / "index.html").write_text("<!doctype html><title>x</title>", encoding="utf-8")
+    settings = _settings()
+    settings = Settings(**{**settings.__dict__, "webapp_dist_dir": str(tmp_path)})
+    app = create_api_app(settings=settings, session_factory=session_factory, notifier=None)
+    spa_client = TestClient(app)
+
+    assert spa_client.get("/api/health").json() == {"status": "ok"}
+    root = spa_client.get("/")
+    assert root.status_code == 200
+    assert "<!doctype html>" in root.text
+    # Unknown non-API path falls back to index.html (SPA routing).
+    assert spa_client.get("/settings").status_code == 200
+    # Unknown API path returns JSON 404, not the SPA shell.
+    assert spa_client.get("/api/does-not-exist").status_code == 404
+
+
 def test_public_availability_uses_date_alias(client: TestClient) -> None:
     headers = _auth_headers(MASTER)
     me = client.get("/api/me", headers=headers).json()
