@@ -73,11 +73,11 @@ def create_api_app(
 
             index_file = path / "index.html"
 
-            @app.get("/", include_in_schema=False)
+            @app.get("/", include_in_schema=False, response_model=None)
             async def _index() -> FileResponse:
                 return FileResponse(str(index_file))
 
-            @app.get("/{full_path:path}", include_in_schema=False)
+            @app.get("/{full_path:path}", include_in_schema=False, response_model=None)
             async def _spa_fallback(full_path: str) -> FileResponse | JSONResponse:
                 if full_path.startswith("api/"):
                     return JSONResponse({"detail": "not found"}, status_code=404)
