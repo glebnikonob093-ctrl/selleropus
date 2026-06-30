@@ -281,7 +281,11 @@ async def update_booking(
     await session.flush()
 
     notifier = app_state.notifier
-    if notifier is not None and payload.status is not None and payload.status != old_status:
+    status_changed = payload.status is not None and payload.status != old_status
+    if notifier is not None and status_changed:
+        # Commit the status change before notifying so the client is never told
+        # about a state that a later commit failure would roll back.
+        await session.commit()
         try:
             await notifier.notify_status_change(  # type: ignore[attr-defined]
                 client=client,
