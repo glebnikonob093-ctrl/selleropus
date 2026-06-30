@@ -157,13 +157,16 @@ async def _send_morning_summaries(
                 continue
 
             # Record the send only after a successful notify so a failure is
-            # retried on a later tick within the morning window.
-            marker = MasterDailySummary(master_id=master.id, day=today)
-            session.add(marker)
+            # retried on a later tick within the morning window. Use a SAVEPOINT
+            # so a duplicate-marker conflict (concurrent tick) only discards this
+            # master's insert and not markers already flushed for earlier masters
+            # in the shared transaction.
             try:
-                await session.flush()
+                async with session.begin_nested():
+                    session.add(MasterDailySummary(master_id=master.id, day=today))
+                    await session.flush()
             except IntegrityError:  # pragma: no cover - concurrent tick
-                await session.rollback()
+                pass
 
 
 async def run_reminder_tick(

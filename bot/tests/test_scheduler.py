@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -20,9 +20,11 @@ from app.models import (
 class _RecordingNotifier:
     def __init__(self) -> None:
         self.morning_calls: list[list] = []
+        self.greeted_master_ids: list[int] = []
 
     async def notify_master_morning_summary(self, *, master, bookings) -> None:
         self.morning_calls.append(list(bookings))
+        self.greeted_master_ids.append(master.id)
 
 
 class _FrozenDatetime(datetime):
@@ -107,3 +109,22 @@ async def test_morning_summary_includes_todays_bookings(
     assert len(notifier.morning_calls) == 1
     assert len(notifier.morning_calls[0]) == 1
     assert await _count_markers(session_factory) == 1
+
+
+async def test_already_greeted_master_skipped_others_still_greeted(
+    session_factory: async_sessionmaker[AsyncSession], _freeze_morning: None
+) -> None:
+    async with session_factory() as session:
+        done = await _make_master(session, tg_user_id=902, slug="done")
+        pending = await _make_master(session, tg_user_id=903, slug="pending")
+        session.add(MasterDailySummary(master_id=done.id, day=date(2026, 6, 30)))
+        await session.commit()
+        done_id, pending_id = done.id, pending.id
+
+    notifier = _RecordingNotifier()
+    await scheduler._send_morning_summaries(session_factory, notifier)  # type: ignore[arg-type]
+
+    # The already-greeted master is skipped; the other is greeted exactly once.
+    assert notifier.greeted_master_ids == [pending_id]
+    assert done_id not in notifier.greeted_master_ids
+    assert await _count_markers(session_factory) == 2
