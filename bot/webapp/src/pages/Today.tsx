@@ -40,7 +40,11 @@ export function Today() {
         title={me ? `Привет, ${me.display_name.split(" ")[0]}!` : "Сегодня"}
         subtitle={me ? `Сегодня записей: ${bookings.length}` : undefined}
         action={
-          <Link to="/settings" className="btn btn--ghost btn--small">
+          <Link
+            to="/settings"
+            className="btn btn--ghost btn--small"
+            style={{ fontSize: 24, textDecoration: "none" }}
+          >
             ⚙️
           </Link>
         }

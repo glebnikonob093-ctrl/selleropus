@@ -958,6 +958,85 @@ def build_dispatcher(
             return
         await _show_today(message, master, back_kb=True)
 
+    _CLIENTS_PAGE_SIZE = 5
+
+    async def _build_clients_page(
+        master_id: int, page: int
+    ) -> tuple[str, InlineKeyboardMarkup]:
+        """Build paginated clients message text + inline keyboard."""
+        async with session_scope(session_factory) as session:
+            clients = await list_clients_for_master(session, master_id)
+            blocked_ids: set[int] = set()
+            blocked_list = await list_blocked_clients(session, master_id)
+            for bc in blocked_list:
+                blocked_ids.add(bc.tg_user_id)
+
+        total = len(clients)
+        if total == 0:
+            kb = InlineKeyboardMarkup(inline_keyboard=[])
+            return "У вас пока нет клиентов.", kb
+
+        total_pages = (total + _CLIENTS_PAGE_SIZE - 1) // _CLIENTS_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * _CLIENTS_PAGE_SIZE
+        page_items = clients[start : start + _CLIENTS_PAGE_SIZE]
+
+        lines = [f"<b>👥 Клиенты ({total}):</b>\n"]
+        for c in page_items:
+            is_blocked = bool(c.tg_user_id and c.tg_user_id in blocked_ids)
+            tg_link = ""
+            if c.tg_username:
+                username = c.tg_username.lstrip("@")
+                tg_link = f' · <a href="https://t.me/{username}">@{username}</a>'
+            tg_id_line = ""
+            if c.tg_user_id:
+                tg_id_line = f"\n   TG ID: <code>{c.tg_user_id}</code>"
+            phone_line = f"\n   Тел: {c.phone}" if c.phone else ""
+            status_icon = " 🚫" if is_blocked else ""
+            lines.append(
+                f"👤 <b>{c.name}</b>{status_icon}{tg_link}{phone_line}{tg_id_line}"
+            )
+
+        lines.append(f"\nСтраница {page + 1}/{total_pages} · Всего: {total}")
+
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(text="◀️", callback_data=f"mclients:{page - 1}")
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}", callback_data="mcl:noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(text="▶️", callback_data=f"mclients:{page + 1}")
+            )
+
+        blk_rows: list[list[InlineKeyboardButton]] = []
+        for c in page_items:
+            if not c.tg_user_id:
+                continue
+            is_blocked = bool(c.tg_user_id in blocked_ids)
+            if is_blocked:
+                blk_rows.append([
+                    InlineKeyboardButton(
+                        text=f"✅ {c.name[:20]}",
+                        callback_data=f"munblk:{c.tg_user_id}",
+                    )
+                ])
+            else:
+                blk_rows.append([
+                    InlineKeyboardButton(
+                        text=f"🚫 {c.name[:20]}",
+                        callback_data=f"mblk:{c.tg_user_id}",
+                    )
+                ])
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row, *blk_rows])
+        return "\n".join(lines), kb
+
     @router.message(F.text == _M_BTN_CLIENTS)
     async def on_btn_clients(message: Message) -> None:
         from_user = message.from_user
@@ -966,57 +1045,36 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
-        async with session_scope(session_factory) as session:
-            clients = await list_clients_for_master(session, master.id)
-            blocked_ids: set[int] = set()
-            blocked_list = await list_blocked_clients(session, master.id)
-            for bc in blocked_list:
-                blocked_ids.add(bc.tg_user_id)
-
-        if not clients:
-            await message.answer(
-                "У вас пока нет клиентов.",
-                reply_markup=_back_kb(),
-            )
-            return
-
-        for c in clients[:20]:
-            is_blocked = bool(c.tg_user_id and c.tg_user_id in blocked_ids)
-            tg_link = ""
-            if c.tg_username:
-                username = c.tg_username.lstrip("@")
-                tg_link = f'\n<a href="https://t.me/{username}">@{username}</a>'
-            tg_id_line = f"\nTG ID: <code>{c.tg_user_id}</code>" if c.tg_user_id else ""
-            phone_line = f"\nТел: {c.phone}" if c.phone else ""
-            status_line = "\n🚫 Заблокирован" if is_blocked else ""
-
-            text = f"<b>{c.name}</b>{phone_line}{tg_link}{tg_id_line}{status_line}"
-
-            buttons: list[list[InlineKeyboardButton]] = []
-            if c.tg_user_id:
-                if is_blocked:
-                    buttons.append([
-                        InlineKeyboardButton(
-                            text="✅ Разблокировать",
-                            callback_data=f"munblk:{c.tg_user_id}",
-                        )
-                    ])
-                else:
-                    buttons.append([
-                        InlineKeyboardButton(
-                            text="🚫 Заблокировать",
-                            callback_data=f"mblk:{c.tg_user_id}",
-                        )
-                    ])
-
-            kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
-            await message.answer(text, parse_mode="HTML", reply_markup=kb)
-
+        text, kb = await _build_clients_page(master.id, 0)
         await message.answer(
-            f"Всего клиентов: {len(clients)}"
-            + (" (показаны первые 20)" if len(clients) > 20 else ""),
-            reply_markup=_back_kb(),
+            text,
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_web_page_preview=True,
         )
+
+    @router.callback_query(F.data.startswith("mclients:"))
+    async def on_clients_page(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        page = int((callback.data or "mclients:0").split(":", 1)[1])
+        text, kb = await _build_clients_page(master.id, page)
+        await callback.message.edit_text(
+            text,
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "mcl:noop")
+    async def on_clients_noop(callback: CallbackQuery) -> None:
+        await callback.answer()
 
     @router.message(F.text == _M_BTN_STATS)
     async def on_btn_stats(message: Message) -> None:
@@ -1178,8 +1236,8 @@ def build_dispatcher(
                 lines.append(f"• {tm.display_name or 'Участник'}{tg_link} · <code>{tm.tg_user_id}</code>")
 
         lines.append(
-            "\nДобавить: /addteam <tg_id> <имя>\n"
-            "Удалить: /removeteam <tg_id>"
+            "\nДобавить: <code>/addteam TG_ID Имя</code>\n"
+            "Удалить: <code>/removeteam TG_ID</code>"
         )
 
         kb = InlineKeyboardMarkup(
