@@ -39,6 +39,7 @@ from app.booking import (
 )
 from app.db import session_scope
 from app.models import (
+    BOOKING_STATUS_CANCELLED,
     Booking,
     Client,
     Master,
@@ -326,18 +327,72 @@ def build_client_dispatcher(
             )
             return
 
-        lines = ["<b>Ваши предстоящие записи:</b>\n"]
         for booking, service in bookings_for_client:
             dt = booking.starts_at
             day_label = f"{_WEEKDAYS_RU[dt.weekday()]} {dt.strftime('%d.%m.%Y')}"
-            lines.append(
-                f"• {service.name} — {day_label} в {dt.strftime('%H:%M')}"
+            text = (
+                f"<b>{service.name}</b>\n"
+                f"{day_label} в {dt.strftime('%H:%M')}\n"
+                f"{service.price}₽ · {service.duration_minutes} мин"
             )
-        await message.answer(
-            "\n".join(lines),
-            reply_markup=_main_menu_kb(),
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [
+                        InlineKeyboardButton(
+                            text="❌ Отменить запись",
+                            callback_data=f"mycxl:{booking.id}",
+                        )
+                    ]
+                ]
+            )
+            await message.answer(text, reply_markup=kb, parse_mode="HTML")
+
+    @router.callback_query(F.data.startswith("mycxl:"))
+    async def on_client_cancel_booking(
+        callback: CallbackQuery, state: FSMContext
+    ) -> None:
+        booking_id = int((callback.data or "mycxl:0").split(":", 1)[1])
+        from_user = callback.from_user
+        assert isinstance(callback.message, Message)
+
+        async with session_scope(session_factory) as session:
+            client = await _get_client(session, from_user.id) if from_user else None
+            if client is None:
+                await callback.answer("Клиент не найден", show_alert=True)
+                return
+            res = await session.execute(
+                select(Booking).where(
+                    Booking.id == booking_id,
+                    Booking.client_id == client.id,
+                    Booking.master_id == master_id,
+                )
+            )
+            booking = res.scalar_one_or_none()
+            if booking is None:
+                await callback.answer("Запись не найдена", show_alert=True)
+                return
+            if booking.status == BOOKING_STATUS_CANCELLED:
+                await callback.answer("Уже отменена", show_alert=True)
+                return
+            booking.status = BOOKING_STATUS_CANCELLED
+            master = await _get_master(session)
+
+        await callback.message.edit_text(
+            callback.message.text + "\n\n❌ <b>Отменена вами</b>",
             parse_mode="HTML",
         )
+        await callback.answer("Запись отменена")
+
+        if main_notifier is not None and master is not None:
+            try:
+                await main_notifier._safe_send(
+                    master.tg_chat_id,
+                    f"❌ Клиент отменил запись\n"
+                    f"Клиент: {client.name}\n"
+                    f"Когда: {booking.starts_at.strftime('%d.%m.%Y %H:%M')}",
+                )
+            except Exception:
+                log.exception("cancel_notify_failed master_id=%s", master_id)
 
     @router.message(F.text == _BTN_MY_PROFILE)
     async def on_menu_my_profile(message: Message, state: FSMContext) -> None:

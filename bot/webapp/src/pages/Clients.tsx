@@ -105,6 +105,10 @@ export function ClientsPage() {
           editing
             ? async () => {
                 if (!editing) return;
+                const ok = window.confirm(
+                  `Удалить клиента "${editing.name}" и все его записи? Это действие нельзя отменить.`,
+                );
+                if (!ok) return;
                 await api.deleteClient(editing.id);
                 setEditing(null);
                 await reload(query);

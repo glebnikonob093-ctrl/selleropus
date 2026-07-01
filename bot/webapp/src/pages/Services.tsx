@@ -99,6 +99,10 @@ export function ServicesPage() {
           editing
             ? async () => {
                 if (!editing) return;
+                const ok = window.confirm(
+                  `Удалить услугу "${editing.name}"? Это действие нельзя отменить.`,
+                );
+                if (!ok) return;
                 await api.deleteService(editing.id);
                 setEditing(null);
                 await reload();
