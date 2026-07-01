@@ -61,6 +61,7 @@ class Master(Base):
     work_start_minutes: Mapped[int] = mapped_column(Integer, default=10 * 60)  # 10:00
     work_end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)  # 20:00
     slot_step_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    book_days_ahead: Mapped[int] = mapped_column(Integer, default=30)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

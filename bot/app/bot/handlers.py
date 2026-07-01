@@ -1406,6 +1406,10 @@ def build_dispatcher(
             schedule = await get_master_schedule(session, master_id)
             if not schedule:
                 schedule = await init_default_schedule(session, master_id)
+            res = await session.execute(
+                select(Master.book_days_ahead).where(Master.id == master_id)
+            )
+            book_days = res.scalar_one_or_none() or 30
 
         lines = ["<b>⏰ Ваше расписание</b>\n"]
         for row in schedule:
@@ -1417,6 +1421,7 @@ def build_dispatcher(
                 )
             else:
                 lines.append(f"❌ <b>{wd}</b>: выходной")
+        lines.append(f"\n📆 Запись открыта на <b>{book_days}</b> дн. вперёд")
 
         buttons: list[list[InlineKeyboardButton]] = []
         row1: list[InlineKeyboardButton] = []
@@ -1433,6 +1438,11 @@ def build_dispatcher(
                 row2.append(btn)
         buttons.append(row1)
         buttons.append(row2)
+        buttons.append([
+            InlineKeyboardButton(text="◀️", callback_data="sched:horizon:-7"),
+            InlineKeyboardButton(text=f"📆 {book_days} дн.", callback_data="sched:noop"),
+            InlineKeyboardButton(text="▶️", callback_data="sched:horizon:7"),
+        ])
         buttons.append([
             InlineKeyboardButton(text="📅 Выходные дни", callback_data="sched:offs:0"),
         ])
@@ -1470,6 +1480,8 @@ def build_dispatcher(
             f"Начало: {_minutes_to_hhmm(row.start_minutes)}\n"
             f"Конец: {_minutes_to_hhmm(row.end_minutes)}"
         )
+        start_hm = _minutes_to_hhmm(row.start_minutes)
+        end_hm = _minutes_to_hhmm(row.end_minutes)
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(
@@ -1479,14 +1491,14 @@ def build_dispatcher(
                 [
                     InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:start:-60"),
                     InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:start:-30"),
-                    InlineKeyboardButton(text=f"Начало {_minutes_to_hhmm(row.start_minutes)}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text=f"🌅{start_hm}", callback_data="sched:noop"),
                     InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:start:30"),
                     InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:start:60"),
                 ],
                 [
                     InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:end:-60"),
                     InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:end:-30"),
-                    InlineKeyboardButton(text=f"Конец {_minutes_to_hhmm(row.end_minutes)}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text=f"🌙{end_hm}", callback_data="sched:noop"),
                     InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:end:30"),
                     InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:end:60"),
                 ],
@@ -1536,6 +1548,26 @@ def build_dispatcher(
         async with session_scope(session_factory) as session:
             await adjust_schedule_time(session, master.id, weekday, field, delta)
         await _show_schedule_day(callback.message, master.id, weekday)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("sched:horizon:"))
+    async def on_schedule_horizon(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        delta = int((callback.data or "sched:horizon:0").split(":", 2)[2])
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Master).where(Master.id == master.id)
+            )
+            m = res.scalar_one_or_none()
+            if m is not None:
+                new_val = max(7, min(90, m.book_days_ahead + delta))
+                m.book_days_ahead = new_val
+        await _show_schedule(callback.message, master.id, edit=True)
         await callback.answer()
 
     @router.callback_query(F.data == "sched:back")

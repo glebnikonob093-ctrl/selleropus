@@ -58,7 +58,6 @@ from app.repos import (
 log = logging.getLogger(__name__)
 
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-_BOOK_DAYS_AHEAD = 14
 _MONTH_NAMES_RU = [
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
@@ -121,7 +120,7 @@ async def _calendar_keyboard(
     master_id: int,
     month_offset: int = 0,
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Build a month-view calendar with working/non-working indicators."""
+    """Build a full month-view calendar. All days shown; bookable days clickable."""
     today = datetime.utcnow().date()
     first = (today.replace(day=1) + timedelta(days=32 * month_offset)).replace(day=1)
 
@@ -131,24 +130,26 @@ async def _calendar_keyboard(
     offs = await list_day_offs(session, master_id)
     off_dates = {o.day for o in offs}
 
-    max_date = today + timedelta(days=_BOOK_DAYS_AHEAD)
+    # Get master's book_days_ahead setting
+    res = await session.execute(
+        select(Master.book_days_ahead).where(Master.id == master_id)
+    )
+    book_days = res.scalar_one_or_none() or 30
+    max_date = today + timedelta(days=book_days)
 
     title = f"📅 {_MONTH_NAMES_RU[first.month - 1]} {first.year}"
 
     rows: list[list[InlineKeyboardButton]] = []
-    # Month navigation
     rows.append([
         InlineKeyboardButton(text="◀️", callback_data=f"cbcal:{month_offset - 1}"),
         InlineKeyboardButton(text=title, callback_data="cbnoop"),
         InlineKeyboardButton(text="▶️", callback_data=f"cbcal:{month_offset + 1}"),
     ])
-    # Weekday headers
     rows.append([
         InlineKeyboardButton(text=wd, callback_data="cbnoop")
         for wd in _WEEKDAYS_RU
     ])
 
-    # Calendar days
     d = first
     week: list[InlineKeyboardButton] = []
     for _ in range(first.weekday()):
@@ -159,11 +160,14 @@ async def _calendar_keyboard(
         is_working = sched.is_working if sched else True
         is_off = d in off_dates
         is_past = d < today
-        is_future = d >= max_date
+        is_beyond = d >= max_date
 
-        if is_past or is_future or not is_working or is_off:
-            label = "·" if is_past or is_future else "—"
-            week.append(InlineKeyboardButton(text=label, callback_data="cbnoop"))
+        if is_past:
+            week.append(InlineKeyboardButton(text="·", callback_data="cbnoop"))
+        elif not is_working or is_off:
+            week.append(InlineKeyboardButton(text="—", callback_data="cbnoop"))
+        elif is_beyond:
+            week.append(InlineKeyboardButton(text=str(d.day), callback_data="cbnoop"))
         else:
             label = f"{'✦' if d == today else ''}{d.day}"
             week.append(InlineKeyboardButton(
