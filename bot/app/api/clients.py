@@ -168,4 +168,11 @@ async def delete_client(
     session: AsyncSession = Depends(get_session),
 ) -> None:
     client = await _get_owned_client(session, master, client_id)
+    # Delete bookings first (cascade handles their reminder_states)
+    res = await session.execute(
+        select(Booking).where(Booking.client_id == client.id)
+    )
+    for booking in res.scalars():
+        await session.delete(booking)
+    await session.flush()
     await session.delete(client)
