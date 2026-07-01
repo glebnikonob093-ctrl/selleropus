@@ -201,3 +201,19 @@ class MasterBot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     master: Mapped[Master] = relationship()
+
+
+class BlockedClient(Base):
+    """A client blocked by a master. Blocked clients cannot book via master bot."""
+
+    __tablename__ = "blocked_clients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "tg_user_id", name="uq_blocked_client_master_tg"),
+    )

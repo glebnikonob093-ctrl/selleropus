@@ -14,6 +14,18 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _parse_int_set(raw: str) -> frozenset[int]:
+    result: set[int] = set()
+    for part in (raw or "").split(","):
+        part = part.strip()
+        if part:
+            try:
+                result.add(int(part))
+            except ValueError:
+                pass
+    return frozenset(result)
+
+
 def _parse_hhmm(raw: str, default: tuple[int, int]) -> tuple[int, int]:
     raw = (raw or "").strip()
     if not raw or ":" not in raw:
@@ -40,6 +52,7 @@ class Settings:
     default_work_end: tuple[int, int]
     default_slot_step_minutes: int
     default_timezone: str
+    admin_tg_user_ids: frozenset[int] = frozenset()
 
 
 def load_settings() -> Settings:
@@ -61,4 +74,5 @@ def load_settings() -> Settings:
         default_work_end=_parse_hhmm(os.getenv("DEFAULT_WORK_END", "20:00"), (20, 0)),
         default_slot_step_minutes=_get_int("DEFAULT_SLOT_STEP_MINUTES", 30),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "UTC",
+        admin_tg_user_ids=_parse_int_set(os.getenv("ADMIN_TG_USER_IDS", "")),
     )

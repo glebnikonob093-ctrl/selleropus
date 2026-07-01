@@ -6,13 +6,14 @@ import re
 import secrets
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InitDataUser
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
     BOOKING_STATUS_CAME,
+    BlockedClient,
     Booking,
     Client,
     Master,
@@ -260,6 +261,110 @@ async def get_revenue(
         )
     )
     return sum(int(p or 0) for p in res.scalars())
+
+
+async def block_client(
+    session: AsyncSession,
+    master_id: int,
+    tg_user_id: int,
+    reason: str | None = None,
+) -> BlockedClient:
+    res = await session.execute(
+        select(BlockedClient).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        existing.reason = reason
+        return existing
+    bc = BlockedClient(master_id=master_id, tg_user_id=tg_user_id, reason=reason)
+    session.add(bc)
+    await session.flush()
+    return bc
+
+
+async def unblock_client(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(BlockedClient).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    bc = res.scalar_one_or_none()
+    if bc is None:
+        return False
+    await session.delete(bc)
+    await session.flush()
+    return True
+
+
+async def is_client_blocked(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(BlockedClient.id).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def list_blocked_clients(
+    session: AsyncSession, master_id: int
+) -> list[BlockedClient]:
+    res = await session.execute(
+        select(BlockedClient)
+        .where(BlockedClient.master_id == master_id)
+        .order_by(BlockedClient.blocked_at.desc())
+    )
+    return list(res.scalars())
+
+
+async def count_masters(session: AsyncSession) -> int:
+    res = await session.execute(
+        select(func.count()).select_from(Master).where(Master.is_master.is_(True))
+    )
+    return res.scalar_one()
+
+
+async def count_clients(session: AsyncSession) -> int:
+    res = await session.execute(select(func.count()).select_from(Client))
+    return res.scalar_one()
+
+
+async def count_bookings(session: AsyncSession) -> int:
+    res = await session.execute(select(func.count()).select_from(Booking))
+    return res.scalar_one()
+
+
+async def count_active_master_bots(session: AsyncSession) -> int:
+    res = await session.execute(
+        select(func.count()).select_from(MasterBot).where(MasterBot.is_active.is_(True))
+    )
+    return res.scalar_one()
+
+
+async def list_all_masters(session: AsyncSession) -> list[Master]:
+    res = await session.execute(
+        select(Master).where(Master.is_master.is_(True)).order_by(Master.created_at.desc())
+    )
+    return list(res.scalars())
+
+
+async def list_clients_for_master(
+    session: AsyncSession, master_id: int
+) -> list[Client]:
+    res = await session.execute(
+        select(Client)
+        .where(Client.master_id == master_id)
+        .order_by(Client.created_at.desc())
+    )
+    return list(res.scalars())
 
 
 async def find_clients_to_return(

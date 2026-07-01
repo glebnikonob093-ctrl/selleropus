@@ -25,7 +25,9 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 from sqlalchemy import select
@@ -48,12 +50,23 @@ from app.models import (
 )
 from app.notifications import Notifier
 from app.repos import (
+    block_client,
+    count_active_master_bots,
+    count_bookings,
+    count_clients,
+    count_masters,
     create_master_bot,
     delete_master_bot,
     get_master_bot,
     get_master_bot_by_bot_id,
     get_master_by_slug,
+    get_revenue,
+    list_active_master_bots,
     list_active_services,
+    list_all_masters,
+    list_blocked_clients,
+    list_clients_for_master,
+    unblock_client,
     upsert_master_from_tg,
 )
 
@@ -65,6 +78,15 @@ log = logging.getLogger(__name__)
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOK_DAYS_AHEAD = 14
 
+# Master persistent menu button labels
+_M_BTN_TODAY = "📅 Сегодня"
+_M_BTN_CLIENTS = "👥 Клиенты"
+_M_BTN_STATS = "📊 Статистика"
+_M_BTN_LINK = "🔗 Ссылка"
+_M_BTN_BOT = "🤖 Мой бот"
+_M_BTN_HELP = "❓ Помощь"
+_M_BTN_ADMIN = "👑 Админ-панель"
+
 
 class BookingFlow(StatesGroup):
     """Conversational booking states for a client booking inside the bot."""
@@ -75,6 +97,23 @@ class BookingFlow(StatesGroup):
     name = State()
     phone = State()
     confirm = State()
+
+
+class BlockFlow(StatesGroup):
+    """States for blocking a client by TG ID."""
+
+    tg_id = State()
+
+
+def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
+    rows = [
+        [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_CLIENTS)],
+        [KeyboardButton(text=_M_BTN_STATS), KeyboardButton(text=_M_BTN_LINK)],
+        [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_HELP)],
+    ]
+    if is_admin:
+        rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
 
 
 def _client_link(settings: Settings, bot_username: str, master: Master) -> str:
@@ -513,6 +552,9 @@ def build_dispatcher(
 
     # ---- Master commands ------------------------------------------------------
 
+    def _is_admin(tg_user_id: int) -> bool:
+        return tg_user_id in settings.admin_tg_user_ids
+
     @router.message(CommandStart())
     async def on_start(message: Message, command: CommandObject, state: FSMContext) -> None:
         await state.clear()
@@ -523,8 +565,8 @@ def build_dispatcher(
 
         master = await _ensure_master(message)
         link = _client_link(settings, bot_username, master)
+        is_admin = _is_admin(master.tg_user_id)
 
-        # Check if master has a connected client bot
         bot_line = ""
         async with session_scope(session_factory) as session:
             mb = await get_master_bot(session, master.id)
@@ -547,43 +589,27 @@ def build_dispatcher(
                 if not bot_line
                 else ""
             )
+            + ("\n\n👑 Вы администратор платформы." if is_admin else "")
         )
         await message.answer(
             text,
-            reply_markup=_open_app_keyboard(settings),
+            reply_markup=_master_menu_kb(is_admin),
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
 
-    @router.message(Command("link"))
-    async def on_link(message: Message) -> None:
-        from_user = message.from_user
-        assert from_user is not None
-        master = await _get_existing_master(from_user.id)
-        if master is None:
-            await message.answer(
-                "Эта команда для мастеров. Если вы хотите записаться — "
-                "откройте ссылку, которую дал вам мастер."
-            )
-            return
+    async def _show_link(message: Message, master: Master) -> None:
         link = _client_link(settings, bot_username, master)
+        is_admin = _is_admin(master.tg_user_id)
         await message.answer(
             f"Ваша персональная ссылка для клиентов:\n<code>{link}</code>",
             parse_mode="HTML",
+            reply_markup=_master_menu_kb(is_admin),
             disable_web_page_preview=True,
         )
 
-    @router.message(Command("today"))
-    async def on_today(message: Message) -> None:
-        from_user = message.from_user
-        assert from_user is not None
-        master = await _get_existing_master(from_user.id)
-        if master is None:
-            await message.answer(
-                "Эта команда для мастеров. Чтобы записаться к мастеру, "
-                "откройте присланную им ссылку."
-            )
-            return
+    async def _show_today(message: Message, master: Master) -> None:
+        is_admin = _is_admin(master.tg_user_id)
         async with session_scope(session_factory) as session:
             now = datetime.utcnow()
             day_start = datetime(now.year, now.month, now.day)
@@ -601,7 +627,10 @@ def build_dispatcher(
             rows = list((await session.execute(stmt)).all())
 
         if not rows:
-            await message.answer("На сегодня записей нет.")
+            await message.answer(
+                "На сегодня записей нет.",
+                reply_markup=_master_menu_kb(is_admin),
+            )
             return
 
         lines = [f"<b>Сегодня записей: {len(rows)}</b>"]
@@ -611,19 +640,56 @@ def build_dispatcher(
                 f"{client.name}"
                 + (f" ({client.phone})" if client.phone else "")
             )
-        await message.answer("\n".join(lines), parse_mode="HTML")
+        await message.answer(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    @router.message(Command("link"))
+    async def on_link(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None:
+            await message.answer(
+                "Эта команда для мастеров. Если вы хотите записаться — "
+                "откройте ссылку, которую дал вам мастер."
+            )
+            return
+        await _show_link(message, master)
+
+    @router.message(Command("today"))
+    async def on_today(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None:
+            await message.answer(
+                "Эта команда для мастеров. Чтобы записаться к мастеру, "
+                "откройте присланную им ссылку."
+            )
+            return
+        await _show_today(message, master)
 
     @router.message(Command("help"))
     async def on_help(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        is_admin = _is_admin(from_user.id)
         await message.answer(
             "Команды бота:\n"
-            "/start — приветствие и кнопка приложения\n"
+            "/start — приветствие и меню\n"
             "/link — ваша ссылка для клиентов\n"
             "/today — записи на сегодня\n"
             "/addbot <токен> — подключить бот для записи клиентов\n"
             "/removebot — отключить бот для записи\n"
-            "/mybot — информация о подключённом боте",
-            reply_markup=_open_app_keyboard(settings),
+            "/mybot — информация о подключённом боте\n"
+            "/block <tg_id> — заблокировать клиента\n"
+            "/unblock <tg_id> — разблокировать клиента\n"
+            "/blocked — список заблокированных"
+            + ("\n\n👑 Админ-панель доступна через меню" if is_admin else ""),
+            reply_markup=_master_menu_kb(is_admin),
         )
 
     # ---- Master bot management -----------------------------------------------
@@ -753,6 +819,509 @@ def build_dispatcher(
             f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
             disable_web_page_preview=True,
         )
+
+    # ---- Block / Unblock commands for masters ---------------------------------
+
+    @router.message(Command("block"))
+    async def on_block(message: Message, command: CommandObject) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        raw = (command.args or "").strip()
+        if not raw:
+            await message.answer(
+                "Укажите Telegram ID клиента:\n"
+                "<code>/block 123456789</code>\n\n"
+                "ID клиента можно найти в списке клиентов (👥 Клиенты).",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            tg_user_id = int(raw)
+        except ValueError:
+            await message.answer("Неверный формат ID. Укажите числовой Telegram ID.")
+            return
+
+        async with session_scope(session_factory) as session:
+            await block_client(session, master.id, tg_user_id)
+        await message.answer(
+            f"🚫 Клиент с ID <code>{tg_user_id}</code> заблокирован.\n"
+            "Он больше не сможет записаться через вашего бота.",
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
+        )
+
+    @router.message(Command("unblock"))
+    async def on_unblock(message: Message, command: CommandObject) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        raw = (command.args or "").strip()
+        if not raw:
+            await message.answer(
+                "Укажите Telegram ID клиента:\n"
+                "<code>/unblock 123456789</code>",
+                parse_mode="HTML",
+            )
+            return
+        try:
+            tg_user_id = int(raw)
+        except ValueError:
+            await message.answer("Неверный формат ID.")
+            return
+
+        async with session_scope(session_factory) as session:
+            removed = await unblock_client(session, master.id, tg_user_id)
+        if removed:
+            await message.answer(
+                f"✅ Клиент с ID <code>{tg_user_id}</code> разблокирован.",
+                parse_mode="HTML",
+            )
+        else:
+            await message.answer("Этот клиент не был заблокирован.")
+
+    @router.message(Command("blocked"))
+    async def on_blocked_list(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        async with session_scope(session_factory) as session:
+            blocked = await list_blocked_clients(session, master.id)
+        if not blocked:
+            await message.answer("Нет заблокированных клиентов.")
+            return
+        lines = ["<b>Заблокированные клиенты:</b>"]
+        for bc in blocked:
+            lines.append(f"• ID: <code>{bc.tg_user_id}</code>")
+        await message.answer("\n".join(lines), parse_mode="HTML")
+
+    # ---- Master menu button handlers ------------------------------------------
+
+    @router.message(F.text == _M_BTN_TODAY)
+    async def on_btn_today(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await _show_today(message, master)
+
+    @router.message(F.text == _M_BTN_CLIENTS)
+    async def on_btn_clients(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        is_admin = _is_admin(from_user.id)
+        async with session_scope(session_factory) as session:
+            clients = await list_clients_for_master(session, master.id)
+            blocked_ids: set[int] = set()
+            blocked_list = await list_blocked_clients(session, master.id)
+            for bc in blocked_list:
+                blocked_ids.add(bc.tg_user_id)
+
+        if not clients:
+            await message.answer(
+                "У вас пока нет клиентов.",
+                reply_markup=_master_menu_kb(is_admin),
+            )
+            return
+
+        lines = [f"<b>Ваши клиенты ({len(clients)}):</b>"]
+        for c in clients[:30]:
+            status = " 🚫" if c.tg_user_id and c.tg_user_id in blocked_ids else ""
+            tg_info = f" · TG: <code>{c.tg_user_id}</code>" if c.tg_user_id else ""
+            phone_info = f" · {c.phone}" if c.phone else ""
+            lines.append(f"• {c.name}{phone_info}{tg_info}{status}")
+
+        if len(clients) > 30:
+            lines.append(f"\n... и ещё {len(clients) - 30}")
+
+        lines.append(
+            "\nЗаблокировать: /block <tg_id>\n"
+            "Разблокировать: /unblock <tg_id>"
+        )
+        await message.answer(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    @router.message(F.text == _M_BTN_STATS)
+    async def on_btn_stats(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        is_admin = _is_admin(from_user.id)
+        now = datetime.utcnow()
+        today_start = datetime(now.year, now.month, now.day)
+        week_start = today_start - timedelta(days=today_start.weekday())
+        month_start = datetime(now.year, now.month, 1)
+
+        async with session_scope(session_factory) as session:
+            today_rev = await get_revenue(session, master.id, today_start, today_start + timedelta(days=1))
+            week_rev = await get_revenue(session, master.id, week_start, today_start + timedelta(days=1))
+            month_rev = await get_revenue(session, master.id, month_start, today_start + timedelta(days=1))
+
+            today_count_res = await session.execute(
+                select(Booking).where(
+                    Booking.master_id == master.id,
+                    Booking.starts_at >= today_start,
+                    Booking.starts_at < today_start + timedelta(days=1),
+                    Booking.status.in_(ACTIVE_BOOKING_STATUSES),
+                )
+            )
+            today_count = len(list(today_count_res.scalars()))
+
+            total_clients_res = await session.execute(
+                select(Client).where(Client.master_id == master.id)
+            )
+            total_clients = len(list(total_clients_res.scalars()))
+
+        await message.answer(
+            "<b>📊 Ваша статистика</b>\n\n"
+            f"Записей сегодня: {today_count}\n"
+            f"Всего клиентов: {total_clients}\n\n"
+            f"<b>Доход (завершённые):</b>\n"
+            f"• Сегодня: {today_rev} ₽\n"
+            f"• Неделя: {week_rev} ₽\n"
+            f"• Месяц: {month_rev} ₽",
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    @router.message(F.text == _M_BTN_LINK)
+    async def on_btn_link(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await _show_link(message, master)
+
+    @router.message(F.text == _M_BTN_BOT)
+    async def on_btn_bot(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        is_admin = _is_admin(from_user.id)
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+
+        if mb is None:
+            await message.answer(
+                "У вас нет подключённого бота.\n"
+                "Создайте бота в @BotFather и подключите:\n"
+                "<code>/addbot ТОКЕН</code>",
+                parse_mode="HTML",
+                reply_markup=_master_menu_kb(is_admin),
+            )
+            return
+
+        running = multibot_manager.is_running(master.id) if multibot_manager else False
+        status = "✅ работает" if running else "⚠️ остановлен"
+        await message.answer(
+            f"Ваш бот: @{mb.bot_username}\n"
+            f"Статус: {status}\n"
+            f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
+            disable_web_page_preview=True,
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    @router.message(F.text == _M_BTN_HELP)
+    async def on_btn_help(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        is_admin = _is_admin(from_user.id)
+        await message.answer(
+            "Команды бота:\n"
+            "/start — приветствие и меню\n"
+            "/link — ваша ссылка для клиентов\n"
+            "/today — записи на сегодня\n"
+            "/addbot <токен> — подключить бот для записи\n"
+            "/removebot — отключить бот для записи\n"
+            "/mybot — информация о боте\n"
+            "/block <tg_id> — заблокировать клиента\n"
+            "/unblock <tg_id> — разблокировать клиента\n"
+            "/blocked — список заблокированных",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    # ---- Admin panel ----------------------------------------------------------
+
+    @router.message(F.text == _M_BTN_ADMIN)
+    async def on_btn_admin(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        if not _is_admin(from_user.id):
+            return
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика платформы", callback_data="adm:stats")],
+                [InlineKeyboardButton(text="👥 Все мастера", callback_data="adm:masters")],
+                [InlineKeyboardButton(text="🤖 Все боты", callback_data="adm:bots")],
+                [InlineKeyboardButton(text="📢 Рассылка мастерам", callback_data="adm:broadcast")],
+            ]
+        )
+        await message.answer(
+            "👑 <b>Админ-панель Clientika</b>\n\nВыберите раздел:",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+
+    @router.callback_query(F.data == "adm:stats")
+    async def on_admin_stats(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        now = datetime.utcnow()
+        today_start = datetime(now.year, now.month, now.day)
+
+        async with session_scope(session_factory) as session:
+            n_masters = await count_masters(session)
+            n_clients = await count_clients(session)
+            n_bookings = await count_bookings(session)
+            n_bots = await count_active_master_bots(session)
+
+            today_bookings_res = await session.execute(
+                select(Booking).where(
+                    Booking.starts_at >= today_start,
+                    Booking.starts_at < today_start + timedelta(days=1),
+                    Booking.status.in_(ACTIVE_BOOKING_STATUSES),
+                )
+            )
+            today_bookings = len(list(today_bookings_res.scalars()))
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+            ]
+        )
+        await callback.message.edit_text(
+            "<b>📊 Статистика платформы</b>\n\n"
+            f"Мастеров: {n_masters}\n"
+            f"Клиентов: {n_clients}\n"
+            f"Записей всего: {n_bookings}\n"
+            f"Записей сегодня: {today_bookings}\n"
+            f"Активных ботов: {n_bots}",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "adm:masters")
+    async def on_admin_masters(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        async with session_scope(session_factory) as session:
+            masters = await list_all_masters(session)
+            for m in masters:
+                session.expunge(m)
+
+        if not masters:
+            await callback.message.edit_text("Нет зарегистрированных мастеров.")
+            await callback.answer()
+            return
+
+        lines = [f"<b>👥 Мастера ({len(masters)}):</b>"]
+        for m in masters[:20]:
+            tg_info = f"@{m.tg_username}" if m.tg_username else f"ID: {m.tg_user_id}"
+            lines.append(f"• {m.display_name} · {tg_info}")
+        if len(masters) > 20:
+            lines.append(f"\n... и ещё {len(masters) - 20}")
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+            ]
+        )
+        await callback.message.edit_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=kb
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "adm:bots")
+    async def on_admin_bots(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        async with session_scope(session_factory) as session:
+            bots = await list_active_master_bots(session)
+            bot_info: list[tuple[str, str, bool]] = []
+            for mb in bots:
+                master_res = await session.execute(
+                    select(Master).where(Master.id == mb.master_id)
+                )
+                master_obj = master_res.scalar_one_or_none()
+                m_name = master_obj.display_name if master_obj else "?"
+                running = multibot_manager.is_running(mb.master_id) if multibot_manager else False
+                bot_info.append((mb.bot_username, m_name, running))
+
+        if not bot_info:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+                ]
+            )
+            await callback.message.edit_text(
+                "Нет активных ботов.", reply_markup=kb
+            )
+            await callback.answer()
+            return
+
+        lines = [f"<b>🤖 Боты ({len(bot_info)}):</b>"]
+        for username, m_name, running in bot_info:
+            status = "✅" if running else "⚠️"
+            lines.append(f"• @{username} — {m_name} {status}")
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+            ]
+        )
+        await callback.message.edit_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=kb
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "adm:broadcast")
+    async def on_admin_broadcast_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        await state.set_state(BlockFlow.tg_id)
+        await state.update_data(admin_broadcast=True)
+        await callback.message.edit_text(
+            "📢 <b>Рассылка мастерам</b>\n\n"
+            "Отправьте текст сообщения, которое получат все мастера.\n"
+            "Для отмены отправьте /start",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+
+    @router.message(BlockFlow.tg_id, F.text)
+    async def on_broadcast_text(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        data = await state.get_data()
+
+        if data.get("admin_broadcast") and _is_admin(from_user.id):
+            broadcast_text = (message.text or "").strip()
+            if not broadcast_text:
+                await message.answer("Сообщение пустое.")
+                return
+
+            await state.clear()
+            async with session_scope(session_factory) as session:
+                masters = await list_all_masters(session)
+                for m in masters:
+                    session.expunge(m)
+
+            sent = 0
+            for m in masters:
+                if notifier is not None:
+                    ok = await notifier._safe_send(
+                        m.tg_chat_id,
+                        f"📢 Сообщение от администрации Clientika:\n\n{broadcast_text}",
+                    )
+                    if ok:
+                        sent += 1
+
+            await message.answer(
+                f"✅ Рассылка отправлена: {sent}/{len(masters)} мастерам.",
+                reply_markup=_master_menu_kb(True),
+            )
+            return
+
+        await state.clear()
+        await message.answer("Команда не распознана. Нажмите /start.")
+
+    @router.callback_query(F.data == "adm:back")
+    async def on_admin_back(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика платформы", callback_data="adm:stats")],
+                [InlineKeyboardButton(text="👥 Все мастера", callback_data="adm:masters")],
+                [InlineKeyboardButton(text="🤖 Все боты", callback_data="adm:bots")],
+                [InlineKeyboardButton(text="📢 Рассылка мастерам", callback_data="adm:broadcast")],
+            ]
+        )
+        await callback.message.edit_text(
+            "👑 <b>Админ-панель Clientika</b>\n\nВыберите раздел:",
+            parse_mode="HTML",
+            reply_markup=kb,
+        )
+        await callback.answer()
+
+    # ---- Inline block/unblock from client list --------------------------------
+
+    @router.callback_query(F.data.startswith("mblk:"))
+    async def on_inline_block(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        assert isinstance(callback.message, Message)
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+        tg_user_id = int((callback.data or "mblk:0").split(":", 1)[1])
+        async with session_scope(session_factory) as session:
+            await block_client(session, master.id, tg_user_id)
+        await callback.answer(f"Клиент {tg_user_id} заблокирован", show_alert=True)
+
+    @router.callback_query(F.data.startswith("munblk:"))
+    async def on_inline_unblock(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        assert isinstance(callback.message, Message)
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+        tg_user_id = int((callback.data or "munblk:0").split(":", 1)[1])
+        async with session_scope(session_factory) as session:
+            await unblock_client(session, master.id, tg_user_id)
+        await callback.answer(f"Клиент {tg_user_id} разблокирован", show_alert=True)
 
     @router.message(F.web_app_data)
     async def on_webapp_data(message: Message) -> None:

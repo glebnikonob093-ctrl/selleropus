@@ -46,7 +46,7 @@ from app.models import (
     Service,
 )
 from app.notifications import Notifier
-from app.repos import find_or_create_client, list_active_services
+from app.repos import find_or_create_client, is_client_blocked, list_active_services
 
 log = logging.getLogger(__name__)
 
@@ -190,7 +190,14 @@ def build_client_dispatcher(
                 await message.answer("Бот временно недоступен.")
                 return
             display_name = master.display_name
+            blocked = await is_client_blocked(session, master_id, from_user.id)
             client = await _get_client(session, from_user.id)
+
+        if blocked:
+            await message.answer(
+                "К сожалению, вы заблокированы этим мастером и не можете записаться."
+            )
+            return
 
         if client is not None and client.phone:
             await state.update_data(
@@ -413,11 +420,40 @@ def build_client_dispatcher(
             return
 
         master_name = master.display_name if master else "—"
+
+        # Booking history
+        async with session_scope(session_factory) as session:
+            past_res = await session.execute(
+                select(Booking, Service)
+                .join(Service, Booking.service_id == Service.id)
+                .where(
+                    Booking.client_id == client.id,
+                    Booking.master_id == master_id,
+                    Booking.starts_at < datetime.utcnow(),
+                )
+                .order_by(Booking.starts_at.desc())
+                .limit(5)
+            )
+            past_rows = past_res.all()
+
+        history = ""
+        if past_rows:
+            history = "\n\n<b>Последние записи:</b>"
+            for b, s in past_rows:
+                dt = b.starts_at
+                status_icon = {"came": "✅", "cancelled": "❌", "no_show": "⚠️"}.get(
+                    b.status, "📋"
+                )
+                history += (
+                    f"\n{status_icon} {dt.strftime('%d.%m.%Y %H:%M')} — {s.name}"
+                )
+
         await message.answer(
             "<b>Ваш профиль:</b>\n\n"
             f"Имя: {client.name}\n"
             f"Телефон: {client.phone}\n"
-            f"Мастер: {master_name}",
+            f"Мастер: {master_name}"
+            + history,
             reply_markup=_main_menu_kb(),
             parse_mode="HTML",
         )
@@ -425,6 +461,14 @@ def build_client_dispatcher(
     async def _ensure_client_data(
         message: Message, state: FSMContext, tg_user_id: int
     ) -> dict[str, object] | None:
+        async with session_scope(session_factory) as session:
+            blocked = await is_client_blocked(session, master_id, tg_user_id)
+        if blocked:
+            await message.answer(
+                "К сожалению, вы заблокированы этим мастером.",
+                reply_markup=_main_menu_kb(),
+            )
+            return None
         data = await state.get_data()
         if data.get("phone"):
             return data
