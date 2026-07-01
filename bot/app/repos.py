@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +18,8 @@ from app.models import (
     Client,
     Master,
     MasterBot,
+    MasterDayOff,
+    MasterSchedule,
     Service,
     TeamMember,
 )
@@ -446,6 +448,135 @@ async def list_team_members(
     return list(res.scalars())
 
 
+# ---- Master schedule --------------------------------------------------------
+
+
+async def get_master_schedule(
+    session: AsyncSession, master_id: int
+) -> list[MasterSchedule]:
+    res = await session.execute(
+        select(MasterSchedule)
+        .where(MasterSchedule.master_id == master_id)
+        .order_by(MasterSchedule.weekday)
+    )
+    return list(res.scalars())
+
+
+async def get_schedule_for_weekday(
+    session: AsyncSession, master_id: int, weekday: int
+) -> MasterSchedule | None:
+    res = await session.execute(
+        select(MasterSchedule).where(
+            MasterSchedule.master_id == master_id,
+            MasterSchedule.weekday == weekday,
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+async def init_default_schedule(
+    session: AsyncSession,
+    master_id: int,
+    work_start: int = 10 * 60,
+    work_end: int = 20 * 60,
+) -> list[MasterSchedule]:
+    """Create 7 schedule rows (Mon-Sun) if none exist. Sat/Sun default off."""
+    existing = await get_master_schedule(session, master_id)
+    if existing:
+        return existing
+    rows: list[MasterSchedule] = []
+    for wd in range(7):
+        row = MasterSchedule(
+            master_id=master_id,
+            weekday=wd,
+            is_working=wd < 5,
+            start_minutes=work_start,
+            end_minutes=work_end,
+        )
+        session.add(row)
+        rows.append(row)
+    await session.flush()
+    return rows
+
+
+async def toggle_schedule_day(
+    session: AsyncSession, master_id: int, weekday: int
+) -> bool:
+    """Toggle working/not-working for a weekday. Returns new is_working."""
+    row = await get_schedule_for_weekday(session, master_id, weekday)
+    if row is None:
+        return False
+    row.is_working = not row.is_working
+    return row.is_working
+
+
+async def adjust_schedule_time(
+    session: AsyncSession,
+    master_id: int,
+    weekday: int,
+    field: str,
+    delta: int,
+) -> int:
+    """Adjust start_minutes or end_minutes by delta. Returns new value."""
+    row = await get_schedule_for_weekday(session, master_id, weekday)
+    if row is None:
+        return 0
+    if field == "start":
+        row.start_minutes = max(0, min(23 * 60, row.start_minutes + delta))
+        if row.start_minutes >= row.end_minutes:
+            row.start_minutes = row.end_minutes - 30
+        return row.start_minutes
+    row.end_minutes = max(60, min(24 * 60, row.end_minutes + delta))
+    if row.end_minutes <= row.start_minutes:
+        row.end_minutes = row.start_minutes + 30
+    return row.end_minutes
+
+
+# ---- Master day-offs --------------------------------------------------------
+
+
+async def list_day_offs(
+    session: AsyncSession, master_id: int
+) -> list[MasterDayOff]:
+    res = await session.execute(
+        select(MasterDayOff)
+        .where(MasterDayOff.master_id == master_id)
+        .order_by(MasterDayOff.day)
+    )
+    return list(res.scalars())
+
+
+async def is_day_off(
+    session: AsyncSession, master_id: int, day: date
+) -> bool:
+    res = await session.execute(
+        select(MasterDayOff).where(
+            MasterDayOff.master_id == master_id,
+            MasterDayOff.day == day,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def toggle_day_off(
+    session: AsyncSession, master_id: int, day: date
+) -> bool:
+    """Toggle day-off. Returns True if day is now a day-off."""
+    res = await session.execute(
+        select(MasterDayOff).where(
+            MasterDayOff.master_id == master_id,
+            MasterDayOff.day == day,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        await session.delete(existing)
+        return False
+    session.add(MasterDayOff(master_id=master_id, day=day))
+    await session.flush()
+    return True
+
+
 # ---- Admin: delete master ---------------------------------------------------
 
 
@@ -479,6 +610,18 @@ async def delete_master_full(session: AsyncSession, master_id: int) -> bool:
     )
     for tm in team_res.scalars():
         await session.delete(tm)
+
+    # Delete schedule and day-offs
+    sched_res = await session.execute(
+        select(MasterSchedule).where(MasterSchedule.master_id == master_id)
+    )
+    for s in sched_res.scalars():
+        await session.delete(s)
+    off_res = await session.execute(
+        select(MasterDayOff).where(MasterDayOff.master_id == master_id)
+    )
+    for o in off_res.scalars():
+        await session.delete(o)
 
     # Master cascade handles services, clients, bookings
     await session.delete(master)

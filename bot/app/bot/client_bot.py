@@ -48,8 +48,10 @@ from app.models import (
 from app.notifications import Notifier
 from app.repos import (
     find_or_create_client,
+    get_master_schedule,
     is_client_blocked,
     list_active_services,
+    list_day_offs,
     list_team_members,
 )
 
@@ -57,6 +59,10 @@ log = logging.getLogger(__name__)
 
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOK_DAYS_AHEAD = 14
+_MONTH_NAMES_RU = [
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
 
 # Persistent bottom-menu button labels
 _BTN_BOOK = "📝 Записаться"
@@ -110,33 +116,109 @@ def _services_keyboard(services: list[Service]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def _days_keyboard(today: datetime) -> InlineKeyboardMarkup:
+async def _calendar_keyboard(
+    session: AsyncSession,
+    master_id: int,
+    month_offset: int = 0,
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Build a month-view calendar with working/non-working indicators."""
+    today = datetime.utcnow().date()
+    first = (today.replace(day=1) + timedelta(days=32 * month_offset)).replace(day=1)
+
+    schedule = await get_master_schedule(session, master_id)
+    schedule_map = {s.weekday: s for s in schedule}
+
+    offs = await list_day_offs(session, master_id)
+    off_dates = {o.day for o in offs}
+
+    max_date = today + timedelta(days=_BOOK_DAYS_AHEAD)
+
+    title = f"📅 {_MONTH_NAMES_RU[first.month - 1]} {first.year}"
+
     rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for offset in range(_BOOK_DAYS_AHEAD):
-        d = (today + timedelta(days=offset)).date()
-        label = f"{_WEEKDAYS_RU[d.weekday()]} {d.strftime('%d.%m')}"
-        row.append(InlineKeyboardButton(text=label, callback_data=f"cbday:{d.isoformat()}"))
-        if len(row) == 3:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+    # Month navigation
+    rows.append([
+        InlineKeyboardButton(text="◀️", callback_data=f"cbcal:{month_offset - 1}"),
+        InlineKeyboardButton(text=title, callback_data="cbnoop"),
+        InlineKeyboardButton(text="▶️", callback_data=f"cbcal:{month_offset + 1}"),
+    ])
+    # Weekday headers
+    rows.append([
+        InlineKeyboardButton(text=wd, callback_data="cbnoop")
+        for wd in _WEEKDAYS_RU
+    ])
+
+    # Calendar days
+    d = first
+    week: list[InlineKeyboardButton] = []
+    for _ in range(first.weekday()):
+        week.append(InlineKeyboardButton(text=" ", callback_data="cbnoop"))
+
+    while d.month == first.month:
+        sched = schedule_map.get(d.weekday())
+        is_working = sched.is_working if sched else True
+        is_off = d in off_dates
+        is_past = d < today
+        is_future = d >= max_date
+
+        if is_past or is_future or not is_working or is_off:
+            label = "·" if is_past or is_future else "—"
+            week.append(InlineKeyboardButton(text=label, callback_data="cbnoop"))
+        else:
+            label = f"{'✦' if d == today else ''}{d.day}"
+            week.append(InlineKeyboardButton(
+                text=label,
+                callback_data=f"cbday:{d.isoformat()}",
+            ))
+
+        if len(week) == 7:
+            rows.append(week)
+            week = []
+        d += timedelta(days=1)
+
+    if week:
+        while len(week) < 7:
+            week.append(InlineKeyboardButton(text=" ", callback_data="cbnoop"))
+        rows.append(week)
+
     rows.append(_cancel_row())
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+    return title, InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _slots_keyboard(slots: list[datetime]) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
+    """Group time slots by period (morning/afternoon/evening)."""
+    morning: list[datetime] = []
+    afternoon: list[datetime] = []
+    evening: list[datetime] = []
+
     for slot in slots:
-        hhmm = slot.strftime("%H:%M")
-        row.append(InlineKeyboardButton(text=hhmm, callback_data=f"cbslot:{hhmm}"))
-        if len(row) == 4:
+        h = slot.hour
+        if h < 12:
+            morning.append(slot)
+        elif h < 17:
+            afternoon.append(slot)
+        else:
+            evening.append(slot)
+
+    rows: list[list[InlineKeyboardButton]] = []
+    for label, group in [
+        ("🌅 Утро", morning),
+        ("☀️ День", afternoon),
+        ("🌙 Вечер", evening),
+    ]:
+        if not group:
+            continue
+        rows.append([InlineKeyboardButton(text=label, callback_data="cbnoop")])
+        row: list[InlineKeyboardButton] = []
+        for slot in group:
+            hhmm = slot.strftime("%H:%M")
+            row.append(InlineKeyboardButton(text=hhmm, callback_data=f"cbslot:{hhmm}"))
+            if len(row) == 4:
+                rows.append(row)
+                row = []
+        if row:
             rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
+
     rows.append(
         [InlineKeyboardButton(text="◀️ Другой день", callback_data="cbdays")]
     )
@@ -516,9 +598,11 @@ def build_client_dispatcher(
         await state.update_data(service_id=service_id, service_name=service_name)
         await state.set_state(ClientBookingFlow.day)
         assert isinstance(callback.message, Message)
+        async with session_scope(session_factory) as session:
+            title, kb = await _calendar_keyboard(session, master_id)
         await callback.message.edit_text(
-            f"Услуга: <b>{service_name}</b>\nВыберите день:",
-            reply_markup=_days_keyboard(datetime.utcnow()),
+            f"Услуга: <b>{service_name}</b>\n{title}\nВыберите день:",
+            reply_markup=kb,
             parse_mode="HTML",
         )
         await callback.answer()
@@ -530,10 +614,36 @@ def build_client_dispatcher(
     async def on_back_to_days(callback: CallbackQuery, state: FSMContext) -> None:
         await state.set_state(ClientBookingFlow.day)
         assert isinstance(callback.message, Message)
+        data = await state.get_data()
+        svc_name = data.get("service_name", "")
+        async with session_scope(session_factory) as session:
+            title, kb = await _calendar_keyboard(session, master_id)
+        header = f"Услуга: <b>{svc_name}</b>\n" if svc_name else ""
         await callback.message.edit_text(
-            "Выберите день:",
-            reply_markup=_days_keyboard(datetime.utcnow()),
+            f"{header}{title}\nВыберите день:",
+            reply_markup=kb,
+            parse_mode="HTML",
         )
+        await callback.answer()
+
+    @router.callback_query(ClientBookingFlow.day, F.data.startswith("cbcal:"))
+    async def on_calendar_nav(callback: CallbackQuery, state: FSMContext) -> None:
+        month_offset = int((callback.data or "cbcal:0").split(":", 1)[1])
+        assert isinstance(callback.message, Message)
+        data = await state.get_data()
+        svc_name = data.get("service_name", "")
+        async with session_scope(session_factory) as session:
+            title, kb = await _calendar_keyboard(session, master_id, month_offset)
+        header = f"Услуга: <b>{svc_name}</b>\n" if svc_name else ""
+        await callback.message.edit_text(
+            f"{header}{title}\nВыберите день:",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+        await callback.answer()
+
+    @router.callback_query(F.data == "cbnoop")
+    async def on_noop(callback: CallbackQuery) -> None:
         await callback.answer()
 
     @router.callback_query(ClientBookingFlow.day, F.data.startswith("cbday:"))
@@ -560,10 +670,14 @@ def build_client_dispatcher(
 
         await state.update_data(day=day_iso)
         await state.set_state(ClientBookingFlow.slot)
+        data = await state.get_data()
+        svc_name = data.get("service_name", "")
         label = f"{_WEEKDAYS_RU[day.weekday()]} {day.strftime('%d.%m')}"
+        header = f"Услуга: <b>{svc_name}</b>\n" if svc_name else ""
         await callback.message.edit_text(
-            f"Свободное время на {label}:",
+            f"{header}🕐 Свободное время — {label}:",
             reply_markup=_slots_keyboard(slots),
+            parse_mode="HTML",
         )
         await callback.answer()
 

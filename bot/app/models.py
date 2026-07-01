@@ -219,6 +219,38 @@ class BlockedClient(Base):
     )
 
 
+class MasterSchedule(Base):
+    """Per-weekday working hours for a master."""
+
+    __tablename__ = "master_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    weekday: Mapped[int] = mapped_column(Integer)  # 0=Mon .. 6=Sun
+    is_working: Mapped[bool] = mapped_column(Boolean, default=True)
+    start_minutes: Mapped[int] = mapped_column(Integer, default=10 * 60)
+    end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "weekday", name="uq_master_schedule_weekday"),
+    )
+
+
+class MasterDayOff(Base):
+    """A specific date marked as day-off by a master."""
+
+    __tablename__ = "master_day_offs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "day", name="uq_master_day_off"),
+    )
+
+
 class TeamMember(Base):
     """A team member added by a master. Receives booking notifications."""
 

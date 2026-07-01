@@ -52,6 +52,7 @@ from app.models import (
 from app.notifications import Notifier
 from app.repos import (
     add_team_member,
+    adjust_schedule_time,
     block_client,
     count_active_master_bots,
     count_bookings,
@@ -63,13 +64,18 @@ from app.repos import (
     get_master_bot,
     get_master_bot_by_bot_id,
     get_master_by_slug,
+    get_master_schedule,
     get_revenue,
+    init_default_schedule,
     list_active_services,
     list_all_masters,
     list_blocked_clients,
     list_clients_for_master,
+    list_day_offs,
     list_team_members,
     remove_team_member,
+    toggle_day_off,
+    toggle_schedule_day,
     unblock_client,
     upsert_master_from_tg,
 )
@@ -90,6 +96,7 @@ _M_BTN_LINK = "🔗 Ссылка"
 _M_BTN_BOT = "🤖 Мой бот"
 _M_BTN_BLOCKED = "🚫 Заблокированные"
 _M_BTN_TEAM = "👥 Команда"
+_M_BTN_SCHEDULE = "⏰ Расписание"
 _M_BTN_HELP = "❓ Помощь"
 _M_BTN_ADMIN = "👑 Админ-панель"
 
@@ -131,7 +138,8 @@ def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_CLIENTS)],
         [KeyboardButton(text=_M_BTN_STATS), KeyboardButton(text=_M_BTN_LINK)],
         [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_BLOCKED)],
-        [KeyboardButton(text=_M_BTN_TEAM), KeyboardButton(text=_M_BTN_HELP)],
+        [KeyboardButton(text=_M_BTN_TEAM), KeyboardButton(text=_M_BTN_SCHEDULE)],
+        [KeyboardButton(text=_M_BTN_HELP)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
@@ -1384,6 +1392,258 @@ def build_dispatcher(
         async with session_scope(session_factory) as session:
             await remove_team_member(session, master.id, tg_user_id)
         await callback.answer(f"Участник {tg_user_id} удалён", show_alert=True)
+
+    # ---- Schedule management ---------------------------------------------------
+
+    _WEEKDAYS_FULL = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+    _WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+    def _minutes_to_hhmm(m: int) -> str:
+        return f"{m // 60:02d}:{m % 60:02d}"
+
+    async def _show_schedule(message: Message, master_id: int, *, edit: bool = False) -> None:
+        async with session_scope(session_factory) as session:
+            schedule = await get_master_schedule(session, master_id)
+            if not schedule:
+                schedule = await init_default_schedule(session, master_id)
+
+        lines = ["<b>⏰ Ваше расписание</b>\n"]
+        for row in schedule:
+            wd = _WEEKDAYS_FULL[row.weekday]
+            if row.is_working:
+                lines.append(
+                    f"✅ <b>{wd}</b>: {_minutes_to_hhmm(row.start_minutes)} — "
+                    f"{_minutes_to_hhmm(row.end_minutes)}"
+                )
+            else:
+                lines.append(f"❌ <b>{wd}</b>: выходной")
+
+        buttons: list[list[InlineKeyboardButton]] = []
+        row1: list[InlineKeyboardButton] = []
+        row2: list[InlineKeyboardButton] = []
+        for i, row in enumerate(schedule):
+            icon = "✅" if row.is_working else "❌"
+            btn = InlineKeyboardButton(
+                text=f"{icon} {_WEEKDAYS_SHORT[i]}",
+                callback_data=f"sched:day:{i}",
+            )
+            if i < 4:
+                row1.append(btn)
+            else:
+                row2.append(btn)
+        buttons.append(row1)
+        buttons.append(row2)
+        buttons.append([
+            InlineKeyboardButton(text="📅 Выходные дни", callback_data="sched:offs:0"),
+        ])
+
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        if edit:
+            await message.edit_text("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+        else:
+            await message.answer("\n".join(lines), parse_mode="HTML", reply_markup=kb)
+
+    @router.message(F.text == _M_BTN_SCHEDULE)
+    async def on_btn_schedule(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await _show_schedule(message, master.id)
+
+    async def _show_schedule_day(message: Message, master_id: int, weekday: int) -> None:
+        async with session_scope(session_factory) as session:
+            schedule = await get_master_schedule(session, master_id)
+            if not schedule:
+                schedule = await init_default_schedule(session, master_id)
+
+        row = next((s for s in schedule if s.weekday == weekday), None)
+        if row is None:
+            return
+
+        wd_name = _WEEKDAYS_FULL[weekday]
+        status = "Рабочий день ✅" if row.is_working else "Выходной ❌"
+        text = (
+            f"<b>⚙️ {wd_name}</b>\n\n"
+            f"Статус: {status}\n"
+            f"Начало: {_minutes_to_hhmm(row.start_minutes)}\n"
+            f"Конец: {_minutes_to_hhmm(row.end_minutes)}"
+        )
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🔄 Вкл/Выкл",
+                    callback_data=f"sched:toggle:{weekday}",
+                )],
+                [
+                    InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:start:-60"),
+                    InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:start:-30"),
+                    InlineKeyboardButton(text=f"Начало {_minutes_to_hhmm(row.start_minutes)}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:start:30"),
+                    InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:start:60"),
+                ],
+                [
+                    InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:end:-60"),
+                    InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:end:-30"),
+                    InlineKeyboardButton(text=f"Конец {_minutes_to_hhmm(row.end_minutes)}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:end:30"),
+                    InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:end:60"),
+                ],
+                [InlineKeyboardButton(text="◀️ К расписанию", callback_data="sched:back")],
+            ]
+        )
+        await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+    @router.callback_query(F.data.startswith("sched:day:"))
+    async def on_schedule_day(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        weekday = int((callback.data or "sched:day:0").split(":", 2)[2])
+        await _show_schedule_day(callback.message, master.id, weekday)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("sched:toggle:"))
+    async def on_schedule_toggle(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        weekday = int((callback.data or "sched:toggle:0").split(":", 2)[2])
+        async with session_scope(session_factory) as session:
+            await toggle_schedule_day(session, master.id, weekday)
+        await _show_schedule_day(callback.message, master.id, weekday)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("sched:adj:"))
+    async def on_schedule_adjust(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        parts = (callback.data or "").split(":")
+        weekday = int(parts[2])
+        field = parts[3]
+        delta = int(parts[4])
+        async with session_scope(session_factory) as session:
+            await adjust_schedule_time(session, master.id, weekday, field, delta)
+        await _show_schedule_day(callback.message, master.id, weekday)
+        await callback.answer()
+
+    @router.callback_query(F.data == "sched:back")
+    async def on_schedule_back(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        await _show_schedule(callback.message, master.id, edit=True)
+        await callback.answer()
+
+    _MONTH_NAMES = [
+        "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+        "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+    ]
+
+    async def _show_day_offs(message: Message, master_id: int, month_offset: int) -> None:
+        today = datetime.utcnow().date()
+        first = (today.replace(day=1) + timedelta(days=32 * month_offset)).replace(day=1)
+
+        async with session_scope(session_factory) as session:
+            offs = await list_day_offs(session, master_id)
+        off_dates = {o.day for o in offs}
+
+        text = (
+            f"<b>📅 Выходные дни — {_MONTH_NAMES[first.month - 1]} {first.year}</b>\n\n"
+            "Нажмите на дату, чтобы добавить/убрать выходной.\n"
+            "🔴 = выходной"
+        )
+
+        rows: list[list[InlineKeyboardButton]] = []
+        rows.append([
+            InlineKeyboardButton(text="◀️", callback_data=f"sched:offs:{month_offset - 1}"),
+            InlineKeyboardButton(
+                text=f"{_MONTH_NAMES[first.month - 1]} {first.year}",
+                callback_data="sched:noop",
+            ),
+            InlineKeyboardButton(text="▶️", callback_data=f"sched:offs:{month_offset + 1}"),
+        ])
+        rows.append([
+            InlineKeyboardButton(text=wd, callback_data="sched:noop")
+            for wd in _WEEKDAYS_SHORT
+        ])
+
+        d = first
+        week: list[InlineKeyboardButton] = []
+        for _ in range(first.weekday()):
+            week.append(InlineKeyboardButton(text=" ", callback_data="sched:noop"))
+
+        while d.month == first.month:
+            is_off = d in off_dates
+            label = f"🔴{d.day}" if is_off else str(d.day)
+            week.append(InlineKeyboardButton(
+                text=label,
+                callback_data=f"sched:toff:{d.isoformat()}:{month_offset}",
+            ))
+            if len(week) == 7:
+                rows.append(week)
+                week = []
+            d += timedelta(days=1)
+
+        if week:
+            while len(week) < 7:
+                week.append(InlineKeyboardButton(text=" ", callback_data="sched:noop"))
+            rows.append(week)
+
+        rows.append([InlineKeyboardButton(text="◀️ К расписанию", callback_data="sched:back")])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
+    @router.callback_query(F.data.startswith("sched:offs:"))
+    async def on_schedule_day_offs(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        month_offset = int((callback.data or "sched:offs:0").split(":", 2)[2])
+        await _show_day_offs(callback.message, master.id, month_offset)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("sched:toff:"))
+    async def on_toggle_day_off(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        parts = (callback.data or "").split(":")
+        day_iso = parts[2]
+        month_offset = int(parts[3])
+        day = datetime.fromisoformat(day_iso).date()
+
+        async with session_scope(session_factory) as session:
+            is_off = await toggle_day_off(session, master.id, day)
+
+        status = "добавлен выходной" if is_off else "выходной убран"
+        await callback.answer(f"{day.strftime('%d.%m')} — {status}")
+        await _show_day_offs(callback.message, master.id, month_offset)
+
+    @router.callback_query(F.data == "sched:noop")
+    async def on_sched_noop(callback: CallbackQuery) -> None:
+        await callback.answer()
 
     # ---- Admin panel ----------------------------------------------------------
 
