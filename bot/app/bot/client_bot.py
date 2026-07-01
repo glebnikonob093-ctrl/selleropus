@@ -46,7 +46,12 @@ from app.models import (
     Service,
 )
 from app.notifications import Notifier
-from app.repos import find_or_create_client, is_client_blocked, list_active_services
+from app.repos import (
+    find_or_create_client,
+    is_client_blocked,
+    list_active_services,
+    list_team_members,
+)
 
 log = logging.getLogger(__name__)
 
@@ -655,11 +660,16 @@ def build_client_dispatcher(
         assert booking_obj and master_obj and service_obj and client_obj
         if main_notifier is not None:
             try:
+                async with session_scope(session_factory) as sess_tm:
+                    team = await list_team_members(sess_tm, master_id)
+                    for t in team:
+                        sess_tm.expunge(t)
                 await main_notifier.notify_master_new_booking(
                     master=master_obj,
                     booking=booking_obj,
                     client=client_obj,
                     service=service_obj,
+                    team_members=team,
                 )
             except Exception:
                 log.exception("master_bot_notify_failed master_id=%s", master_id)

@@ -19,6 +19,7 @@ from app.models import (
     Client,
     Master,
     Service,
+    TeamMember,
 )
 
 log = logging.getLogger(__name__)
@@ -37,6 +38,19 @@ def _client_label(client: Client) -> str:
     return " · ".join(parts)
 
 
+def _client_label_html(client: Client) -> str:
+    """Rich HTML label with clickable username and copyable TG ID."""
+    parts = [f"<b>{client.name or 'Клиент'}</b>"]
+    if client.phone:
+        parts.append(client.phone)
+    if client.tg_username:
+        username = client.tg_username.lstrip("@")
+        parts.append(f'<a href="https://t.me/{username}">@{username}</a>')
+    if client.tg_user_id:
+        parts.append(f"TG ID: <code>{client.tg_user_id}</code>")
+    return " · ".join(parts)
+
+
 class Notifier:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
@@ -50,6 +64,16 @@ class Notifier:
             log.warning("notifier_send_failed chat_id=%s error=%s", chat_id, exc)
             return False
 
+    async def _safe_send_html(self, chat_id: int, text: str) -> bool:
+        try:
+            await self.bot.send_message(
+                chat_id, text, parse_mode="HTML", disable_web_page_preview=True
+            )
+            return True
+        except TelegramAPIError as exc:
+            log.warning("notifier_send_failed chat_id=%s error=%s", chat_id, exc)
+            return False
+
     async def notify_master_new_booking(
         self,
         *,
@@ -57,16 +81,19 @@ class Notifier:
         booking: Booking,
         client: Client,
         service: Service,
+        team_members: list[TeamMember] | None = None,
     ) -> None:
         text = (
             "🆕 Новая запись\n"
-            f"Клиент: {_client_label(client)}\n"
+            f"Клиент: {_client_label_html(client)}\n"
             f"Услуга: {service.name}\n"
             f"Когда: {_format_local(booking.starts_at)}\n"
             f"Стоимость: {service.price} ₽\n"
             f"Статус: {booking.status}"
         )
-        await self._safe_send(master.tg_chat_id, text)
+        await self._safe_send_html(master.tg_chat_id, text)
+        for tm in team_members or []:
+            await self._safe_send_html(tm.tg_user_id, text)
 
     async def notify_client_booking_confirmed(
         self,

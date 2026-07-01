@@ -62,26 +62,103 @@ export function ClientsPage() {
 
       <div className="list">
         {clients.map((c) => (
-          <button
-            type="button"
+          <div
             className="list-item"
             key={c.id}
-            onClick={() => setEditing(c)}
-            style={{ textAlign: "left", border: "1px solid var(--border)" }}
+            style={{
+              textAlign: "left",
+              border: "1px solid var(--border)",
+              padding: "8px 12px",
+              marginBottom: 6,
+              borderRadius: 8,
+              background: c.is_blocked ? "rgba(255,0,0,0.05)" : undefined,
+            }}
           >
-            <div className="list-item__row">
+            <div
+              className="list-item__row"
+              onClick={() => setEditing(c)}
+              style={{ cursor: "pointer" }}
+            >
               <div>
-                <div className="list-item__title">{c.name}</div>
+                <div className="list-item__title">
+                  {c.name}
+                  {c.is_blocked ? " 🚫" : ""}
+                </div>
                 <div className="list-item__meta">
                   {c.phone ? c.phone : "—"}
-                  {c.tg_username ? ` · @${c.tg_username}` : ""}
+                  {c.tg_username ? (
+                    <>
+                      {" · "}
+                      <a
+                        href={`https://t.me/${c.tg_username}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ color: "var(--link, #2481cc)" }}
+                      >
+                        @{c.tg_username}
+                      </a>
+                    </>
+                  ) : null}
                 </div>
+                {c.tg_user_id ? (
+                  <div className="list-item__meta">
+                    TG ID:{" "}
+                    <span
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void navigator.clipboard.writeText(
+                          String(c.tg_user_id),
+                        );
+                      }}
+                      title="Нажмите чтобы скопировать"
+                      style={{
+                        cursor: "pointer",
+                        textDecoration: "underline dotted",
+                        fontFamily: "monospace",
+                      }}
+                    >
+                      {c.tg_user_id}
+                    </span>
+                  </div>
+                ) : null}
               </div>
               <div className="list-item__meta" style={{ textAlign: "right" }}>
                 {c.last_visit_at ? formatDateTime(c.last_visit_at) : "ни разу"}
               </div>
             </div>
-          </button>
+            {c.tg_user_id ? (
+              <div style={{ marginTop: 6, display: "flex", gap: 6 }}>
+                {c.is_blocked ? (
+                  <button
+                    className="btn btn--small"
+                    style={{ fontSize: 12 }}
+                    onClick={async () => {
+                      await api.unblockClient(c.tg_user_id!);
+                      await reload(query);
+                    }}
+                  >
+                    ✅ Разблокировать
+                  </button>
+                ) : (
+                  <button
+                    className="btn btn--small btn--ghost"
+                    style={{ fontSize: 12, color: "var(--danger, red)" }}
+                    onClick={async () => {
+                      const ok = window.confirm(
+                        `Заблокировать клиента "${c.name}"?`,
+                      );
+                      if (!ok) return;
+                      await api.blockClient(c.tg_user_id!);
+                      await reload(query);
+                    }}
+                  >
+                    🚫 Заблокировать
+                  </button>
+                )}
+              </div>
+            ) : null}
+          </div>
         ))}
       </div>
 

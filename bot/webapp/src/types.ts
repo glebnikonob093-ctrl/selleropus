@@ -37,6 +37,7 @@ export interface Client {
   notes: string | null;
   last_visit_at: string | null;
   created_at: string;
+  is_blocked: boolean;
 }
 
 export interface ClientDetail extends Client {

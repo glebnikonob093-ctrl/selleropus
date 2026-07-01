@@ -19,6 +19,7 @@ from app.models import (
     Master,
     MasterBot,
     Service,
+    TeamMember,
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -384,3 +385,101 @@ async def find_clients_to_return(
         .order_by(Client.last_visit_at.asc())
     )
     return list(res.scalars())
+
+
+# ---- Team members -----------------------------------------------------------
+
+
+async def add_team_member(
+    session: AsyncSession,
+    master_id: int,
+    tg_user_id: int,
+    tg_username: str | None = None,
+    display_name: str = "",
+) -> TeamMember:
+    res = await session.execute(
+        select(TeamMember).where(
+            TeamMember.master_id == master_id,
+            TeamMember.tg_user_id == tg_user_id,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        existing.tg_username = tg_username
+        existing.display_name = display_name or existing.display_name
+        return existing
+    tm = TeamMember(
+        master_id=master_id,
+        tg_user_id=tg_user_id,
+        tg_username=tg_username,
+        display_name=display_name,
+    )
+    session.add(tm)
+    await session.flush()
+    return tm
+
+
+async def remove_team_member(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(TeamMember).where(
+            TeamMember.master_id == master_id,
+            TeamMember.tg_user_id == tg_user_id,
+        )
+    )
+    tm = res.scalar_one_or_none()
+    if tm is None:
+        return False
+    await session.delete(tm)
+    return True
+
+
+async def list_team_members(
+    session: AsyncSession, master_id: int
+) -> list[TeamMember]:
+    res = await session.execute(
+        select(TeamMember)
+        .where(TeamMember.master_id == master_id)
+        .order_by(TeamMember.added_at.desc())
+    )
+    return list(res.scalars())
+
+
+# ---- Admin: delete master ---------------------------------------------------
+
+
+async def delete_master_full(session: AsyncSession, master_id: int) -> bool:
+    """Delete a master and all associated data (cascading)."""
+    res = await session.execute(
+        select(Master).where(Master.id == master_id)
+    )
+    master = res.scalar_one_or_none()
+    if master is None:
+        return False
+
+    # Delete associated master bot
+    bot_res = await session.execute(
+        select(MasterBot).where(MasterBot.master_id == master_id)
+    )
+    mb = bot_res.scalar_one_or_none()
+    if mb is not None:
+        await session.delete(mb)
+
+    # Delete blocked clients
+    blocked_res = await session.execute(
+        select(BlockedClient).where(BlockedClient.master_id == master_id)
+    )
+    for bc in blocked_res.scalars():
+        await session.delete(bc)
+
+    # Delete team members
+    team_res = await session.execute(
+        select(TeamMember).where(TeamMember.master_id == master_id)
+    )
+    for tm in team_res.scalars():
+        await session.delete(tm)
+
+    # Master cascade handles services, clients, bookings
+    await session.delete(master)
+    return True

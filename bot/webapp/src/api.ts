@@ -85,6 +85,10 @@ export const api = {
   updateClient: (id: number, payload: Partial<Client>) =>
     request<Client>("PATCH", `/api/clients/${id}`, payload),
   deleteClient: (id: number) => request<void>("DELETE", `/api/clients/${id}`),
+  blockClient: (tg_user_id: number, reason?: string | null) =>
+    request<unknown>("POST", "/api/clients/block", { tg_user_id, reason }),
+  unblockClient: (tg_user_id: number) =>
+    request<unknown>("POST", "/api/clients/unblock", { tg_user_id }),
 
   listBookings: (params?: {
     date_from?: string;

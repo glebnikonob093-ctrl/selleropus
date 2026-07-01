@@ -217,3 +217,20 @@ class BlockedClient(Base):
     __table_args__ = (
         UniqueConstraint("master_id", "tg_user_id", name="uq_blocked_client_master_tg"),
     )
+
+
+class TeamMember(Base):
+    """A team member added by a master. Receives booking notifications."""
+
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "tg_user_id", name="uq_team_member_master_tg"),
+    )

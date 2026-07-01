@@ -50,6 +50,7 @@ from app.models import (
 )
 from app.notifications import Notifier
 from app.repos import (
+    add_team_member,
     block_client,
     count_active_master_bots,
     count_bookings,
@@ -57,6 +58,7 @@ from app.repos import (
     count_masters,
     create_master_bot,
     delete_master_bot,
+    delete_master_full,
     get_master_bot,
     get_master_bot_by_bot_id,
     get_master_by_slug,
@@ -66,6 +68,8 @@ from app.repos import (
     list_all_masters,
     list_blocked_clients,
     list_clients_for_master,
+    list_team_members,
+    remove_team_member,
     unblock_client,
     upsert_master_from_tg,
 )
@@ -84,6 +88,8 @@ _M_BTN_CLIENTS = "👥 Клиенты"
 _M_BTN_STATS = "📊 Статистика"
 _M_BTN_LINK = "🔗 Ссылка"
 _M_BTN_BOT = "🤖 Мой бот"
+_M_BTN_BLOCKED = "🚫 Заблокированные"
+_M_BTN_TEAM = "👥 Команда"
 _M_BTN_HELP = "❓ Помощь"
 _M_BTN_ADMIN = "👑 Админ-панель"
 
@@ -105,11 +111,24 @@ class BlockFlow(StatesGroup):
     tg_id = State()
 
 
+class TeamFlow(StatesGroup):
+    """States for adding a team member."""
+
+    tg_id = State()
+
+
+class BroadcastFlow(StatesGroup):
+    """States for admin broadcast."""
+
+    text = State()
+
+
 def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_CLIENTS)],
         [KeyboardButton(text=_M_BTN_STATS), KeyboardButton(text=_M_BTN_LINK)],
-        [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_HELP)],
+        [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_BLOCKED)],
+        [KeyboardButton(text=_M_BTN_TEAM), KeyboardButton(text=_M_BTN_HELP)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
@@ -941,25 +960,43 @@ def build_dispatcher(
             )
             return
 
-        lines = [f"<b>Ваши клиенты ({len(clients)}):</b>"]
-        for c in clients[:30]:
-            status = " 🚫" if c.tg_user_id and c.tg_user_id in blocked_ids else ""
-            tg_info = f" · TG: <code>{c.tg_user_id}</code>" if c.tg_user_id else ""
-            phone_info = f" · {c.phone}" if c.phone else ""
-            lines.append(f"• {c.name}{phone_info}{tg_info}{status}")
+        for c in clients[:20]:
+            is_blocked = bool(c.tg_user_id and c.tg_user_id in blocked_ids)
+            tg_link = ""
+            if c.tg_username:
+                username = c.tg_username.lstrip("@")
+                tg_link = f'\n<a href="https://t.me/{username}">@{username}</a>'
+            tg_id_line = f"\nTG ID: <code>{c.tg_user_id}</code>" if c.tg_user_id else ""
+            phone_line = f"\nТел: {c.phone}" if c.phone else ""
+            status_line = "\n🚫 Заблокирован" if is_blocked else ""
 
-        if len(clients) > 30:
-            lines.append(f"\n... и ещё {len(clients) - 30}")
+            text = f"<b>{c.name}</b>{phone_line}{tg_link}{tg_id_line}{status_line}"
 
-        lines.append(
-            "\nЗаблокировать: /block <tg_id>\n"
-            "Разблокировать: /unblock <tg_id>"
-        )
-        await message.answer(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=_master_menu_kb(is_admin),
-        )
+            buttons: list[list[InlineKeyboardButton]] = []
+            if c.tg_user_id:
+                if is_blocked:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text="✅ Разблокировать",
+                            callback_data=f"munblk:{c.tg_user_id}",
+                        )
+                    ])
+                else:
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text="🚫 Заблокировать",
+                            callback_data=f"mblk:{c.tg_user_id}",
+                        )
+                    ])
+
+            kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
+            await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+        if len(clients) > 20:
+            await message.answer(
+                f"... и ещё {len(clients) - 20} клиентов",
+                reply_markup=_master_menu_kb(is_admin),
+            )
 
     @router.message(F.text == _M_BTN_STATS)
     async def on_btn_stats(message: Message) -> None:
@@ -1067,6 +1104,215 @@ def build_dispatcher(
             reply_markup=_master_menu_kb(is_admin),
         )
 
+    # ---- Blocked list button handler -------------------------------------------
+
+    @router.message(F.text == _M_BTN_BLOCKED)
+    async def on_btn_blocked(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        is_admin = _is_admin(from_user.id)
+        async with session_scope(session_factory) as session:
+            blocked = await list_blocked_clients(session, master.id)
+
+        if not blocked:
+            await message.answer(
+                "Нет заблокированных клиентов.",
+                reply_markup=_master_menu_kb(is_admin),
+            )
+            return
+
+        for bc in blocked:
+            text = f"🚫 TG ID: <code>{bc.tg_user_id}</code>"
+            if bc.reason:
+                text += f"\nПричина: {bc.reason}"
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="✅ Разблокировать",
+                        callback_data=f"munblk:{bc.tg_user_id}",
+                    )]
+                ]
+            )
+            await message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+    # ---- Team management button handler ----------------------------------------
+
+    @router.message(F.text == _M_BTN_TEAM)
+    async def on_btn_team(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        async with session_scope(session_factory) as session:
+            members = await list_team_members(session, master.id)
+
+        lines = ["<b>Ваша команда</b>\n"]
+        if not members:
+            lines.append("Пока нет участников команды.")
+        else:
+            for tm in members:
+                tg_link = ""
+                if tm.tg_username:
+                    username = tm.tg_username.lstrip("@")
+                    tg_link = f' · <a href="https://t.me/{username}">@{username}</a>'
+                lines.append(f"• {tm.display_name or 'Участник'}{tg_link} · <code>{tm.tg_user_id}</code>")
+
+        lines.append(
+            "\nДобавить: /addteam <tg_id> <имя>\n"
+            "Удалить: /removeteam <tg_id>"
+        )
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="➕ Добавить участника", callback_data="team:add")],
+            ]
+        )
+        await message.answer(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=kb if not members else InlineKeyboardMarkup(
+                inline_keyboard=[
+                    *[
+                        [InlineKeyboardButton(
+                            text=f"❌ {tm.display_name or tm.tg_user_id}",
+                            callback_data=f"teamrm:{tm.tg_user_id}",
+                        )]
+                        for tm in members
+                    ],
+                    [InlineKeyboardButton(text="➕ Добавить", callback_data="team:add")],
+                ]
+            ),
+        )
+
+    @router.message(Command("addteam"))
+    async def on_addteam(message: Message, command: CommandObject) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        raw = (command.args or "").strip()
+        if not raw:
+            await message.answer(
+                "Укажите TG ID и имя участника:\n"
+                "<code>/addteam 123456789 Имя</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        parts = raw.split(maxsplit=1)
+        try:
+            tg_user_id = int(parts[0])
+        except ValueError:
+            await message.answer("Неверный формат TG ID.")
+            return
+
+        display_name = parts[1] if len(parts) > 1 else ""
+        async with session_scope(session_factory) as session:
+            await add_team_member(session, master.id, tg_user_id, display_name=display_name)
+        await message.answer(
+            f"✅ Участник <code>{tg_user_id}</code> добавлен в команду.\n"
+            "Теперь ему будут приходить уведомления о записях.",
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
+        )
+
+    @router.message(Command("removeteam"))
+    async def on_removeteam(message: Message, command: CommandObject) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        raw = (command.args or "").strip()
+        if not raw:
+            await message.answer(
+                "Укажите TG ID участника:\n"
+                "<code>/removeteam 123456789</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        try:
+            tg_user_id = int(raw)
+        except ValueError:
+            await message.answer("Неверный формат TG ID.")
+            return
+
+        async with session_scope(session_factory) as session:
+            removed = await remove_team_member(session, master.id, tg_user_id)
+        if removed:
+            await message.answer(f"✅ Участник <code>{tg_user_id}</code> удалён из команды.", parse_mode="HTML")
+        else:
+            await message.answer("Этот участник не найден в команде.")
+
+    @router.callback_query(F.data == "team:add")
+    async def on_team_add_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        await state.set_state(TeamFlow.tg_id)
+        await callback.message.answer(
+            "Отправьте TG ID и имя участника в формате:\n"
+            "<code>123456789 Имя</code>\n\n"
+            "Для отмены отправьте /start",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+
+    @router.message(TeamFlow.tg_id, F.text)
+    async def on_team_add_input(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await state.clear()
+            return
+
+        raw = (message.text or "").strip()
+        parts = raw.split(maxsplit=1)
+        try:
+            tg_user_id = int(parts[0])
+        except (ValueError, IndexError):
+            await message.answer("Неверный формат. Укажите TG ID и имя через пробел.")
+            return
+
+        display_name = parts[1] if len(parts) > 1 else ""
+        async with session_scope(session_factory) as session:
+            await add_team_member(session, master.id, tg_user_id, display_name=display_name)
+        await state.clear()
+        await message.answer(
+            f"✅ Участник <code>{tg_user_id}</code> добавлен в команду.",
+            parse_mode="HTML",
+            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
+        )
+
+    @router.callback_query(F.data.startswith("teamrm:"))
+    async def on_team_remove(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+        tg_user_id = int((callback.data or "teamrm:0").split(":", 1)[1])
+        async with session_scope(session_factory) as session:
+            await remove_team_member(session, master.id, tg_user_id)
+        await callback.answer(f"Участник {tg_user_id} удалён", show_alert=True)
+
     # ---- Admin panel ----------------------------------------------------------
 
     @router.message(F.text == _M_BTN_ADMIN)
@@ -1143,29 +1389,41 @@ def build_dispatcher(
 
         async with session_scope(session_factory) as session:
             masters = await list_all_masters(session)
+            master_data: list[tuple[int, str, str | None, int]] = []
             for m in masters:
-                session.expunge(m)
+                master_data.append((m.id, m.display_name, m.tg_username, m.tg_user_id))
 
-        if not masters:
-            await callback.message.edit_text("Нет зарегистрированных мастеров.")
+        if not master_data:
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+                ]
+            )
+            await callback.message.edit_text(
+                "Нет зарегистрированных мастеров.", reply_markup=kb
+            )
             await callback.answer()
             return
 
-        lines = [f"<b>👥 Мастера ({len(masters)}):</b>"]
-        for m in masters[:20]:
-            tg_info = f"@{m.tg_username}" if m.tg_username else f"ID: {m.tg_user_id}"
-            lines.append(f"• {m.display_name} · {tg_info}")
-        if len(masters) > 20:
-            lines.append(f"\n... и ещё {len(masters) - 20}")
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
-            ]
-        )
+        # Send each master as a separate message with a delete button
         await callback.message.edit_text(
-            "\n".join(lines), parse_mode="HTML", reply_markup=kb
+            f"<b>👥 Мастера ({len(master_data)}):</b>",
+            parse_mode="HTML",
         )
+        for mid, name, tg_un, tg_uid in master_data[:20]:
+            tg_link = ""
+            if tg_un:
+                tg_link = f' · <a href="https://t.me/{tg_un}">@{tg_un}</a>'
+            text = f"<b>{name}</b>{tg_link}\nTG ID: <code>{tg_uid}</code>"
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🗑 Удалить мастера",
+                        callback_data=f"adm:delmaster:{mid}",
+                    )]
+                ]
+            )
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
         await callback.answer()
 
     @router.callback_query(F.data == "adm:bots")
@@ -1178,17 +1436,19 @@ def build_dispatcher(
 
         async with session_scope(session_factory) as session:
             bots = await list_active_master_bots(session)
-            bot_info: list[tuple[str, str, bool]] = []
+            bot_data: list[tuple[str, int, str, str | None, int, bool]] = []
             for mb in bots:
                 master_res = await session.execute(
                     select(Master).where(Master.id == mb.master_id)
                 )
                 master_obj = master_res.scalar_one_or_none()
                 m_name = master_obj.display_name if master_obj else "?"
+                m_tg_un = master_obj.tg_username if master_obj else None
+                m_id = mb.master_id
                 running = multibot_manager.is_running(mb.master_id) if multibot_manager else False
-                bot_info.append((mb.bot_username, m_name, running))
+                bot_data.append((mb.bot_username, m_id, m_name, m_tg_un, mb.master_id, running))
 
-        if not bot_info:
+        if not bot_data:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
@@ -1200,19 +1460,29 @@ def build_dispatcher(
             await callback.answer()
             return
 
-        lines = [f"<b>🤖 Боты ({len(bot_info)}):</b>"]
-        for username, m_name, running in bot_info:
-            status = "✅" if running else "⚠️"
-            lines.append(f"• @{username} — {m_name} {status}")
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
-            ]
-        )
         await callback.message.edit_text(
-            "\n".join(lines), parse_mode="HTML", reply_markup=kb
+            f"<b>🤖 Боты ({len(bot_data)}):</b>",
+            parse_mode="HTML",
         )
+        for bot_un, m_id, m_name, m_tg_un, _master_id, running in bot_data:
+            status = "✅ работает" if running else "⚠️ остановлен"
+            master_link = ""
+            if m_tg_un:
+                master_link = f' · <a href="https://t.me/{m_tg_un}">@{m_tg_un}</a>'
+            text = (
+                f"🤖 <a href=\"https://t.me/{bot_un}\">@{bot_un}</a> — {status}\n"
+                f"Мастер: <b>{m_name}</b>{master_link}\n"
+                f"Ссылка: https://t.me/{bot_un}"
+            )
+            kb = InlineKeyboardMarkup(
+                inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🗑 Удалить мастера",
+                        callback_data=f"adm:delmaster:{m_id}",
+                    )]
+                ]
+            )
+            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
         await callback.answer()
 
     @router.callback_query(F.data == "adm:broadcast")
@@ -1223,8 +1493,7 @@ def build_dispatcher(
             return
         assert isinstance(callback.message, Message)
 
-        await state.set_state(BlockFlow.tg_id)
-        await state.update_data(admin_broadcast=True)
+        await state.set_state(BroadcastFlow.text)
         await callback.message.edit_text(
             "📢 <b>Рассылка мастерам</b>\n\n"
             "Отправьте текст сообщения, которое получат все мастера.\n"
@@ -1233,42 +1502,62 @@ def build_dispatcher(
         )
         await callback.answer()
 
-    @router.message(BlockFlow.tg_id, F.text)
+    @router.message(BroadcastFlow.text, F.text)
     async def on_broadcast_text(message: Message, state: FSMContext) -> None:
         from_user = message.from_user
         assert from_user is not None
-        data = await state.get_data()
-
-        if data.get("admin_broadcast") and _is_admin(from_user.id):
-            broadcast_text = (message.text or "").strip()
-            if not broadcast_text:
-                await message.answer("Сообщение пустое.")
-                return
-
+        if not _is_admin(from_user.id):
             await state.clear()
-            async with session_scope(session_factory) as session:
-                masters = await list_all_masters(session)
-                for m in masters:
-                    session.expunge(m)
+            return
 
-            sent = 0
-            for m in masters:
-                if notifier is not None:
-                    ok = await notifier._safe_send(
-                        m.tg_chat_id,
-                        f"📢 Сообщение от администрации Clientika:\n\n{broadcast_text}",
-                    )
-                    if ok:
-                        sent += 1
-
-            await message.answer(
-                f"✅ Рассылка отправлена: {sent}/{len(masters)} мастерам.",
-                reply_markup=_master_menu_kb(True),
-            )
+        broadcast_text = (message.text or "").strip()
+        if not broadcast_text:
+            await message.answer("Сообщение пустое.")
             return
 
         await state.clear()
-        await message.answer("Команда не распознана. Нажмите /start.")
+        async with session_scope(session_factory) as session:
+            masters = await list_all_masters(session)
+            for m in masters:
+                session.expunge(m)
+
+        sent = 0
+        for m in masters:
+            if notifier is not None:
+                ok = await notifier._safe_send(
+                    m.tg_chat_id,
+                    f"📢 Сообщение от администрации Clientika:\n\n{broadcast_text}",
+                )
+                if ok:
+                    sent += 1
+
+        await message.answer(
+            f"✅ Рассылка отправлена: {sent}/{len(masters)} мастерам.",
+            reply_markup=_master_menu_kb(True),
+        )
+
+    @router.callback_query(F.data.startswith("adm:delmaster:"))
+    async def on_admin_delete_master(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        if not _is_admin(from_user.id):
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        master_id = int((callback.data or "adm:delmaster:0").split(":", 2)[2])
+
+        # Stop the master's bot if running
+        if multibot_manager is not None:
+            await multibot_manager.stop_bot(master_id)
+
+        async with session_scope(session_factory) as session:
+            deleted = await delete_master_full(session, master_id)
+
+        if deleted:
+            await callback.message.edit_text("🗑 Мастер удалён.")
+            await callback.answer("Мастер удалён", show_alert=True)
+        else:
+            await callback.answer("Мастер не найден", show_alert=True)
 
     @router.callback_query(F.data == "adm:back")
     async def on_admin_back(callback: CallbackQuery) -> None:

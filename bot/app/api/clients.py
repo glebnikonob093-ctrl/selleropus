@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_current_active_master, get_session
 from app.models import Booking, Client, Master, Service
+from app.repos import block_client, list_blocked_clients, unblock_client
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
 
@@ -22,9 +23,10 @@ class ClientOut(BaseModel):
     notes: str | None
     last_visit_at: datetime | None
     created_at: datetime
+    is_blocked: bool = False
 
     @classmethod
-    def from_model(cls, c: Client) -> ClientOut:
+    def from_model(cls, c: Client, *, blocked: bool = False) -> ClientOut:
         return cls(
             id=c.id,
             name=c.name,
@@ -34,7 +36,19 @@ class ClientOut(BaseModel):
             notes=c.notes,
             last_visit_at=c.last_visit_at,
             created_at=c.created_at,
+            is_blocked=blocked,
         )
+
+
+class BlockedClientOut(BaseModel):
+    tg_user_id: int
+    reason: str | None
+    blocked_at: datetime
+
+
+class BlockRequest(BaseModel):
+    tg_user_id: int
+    reason: str | None = None
 
 
 class ClientCreate(BaseModel):
@@ -88,7 +102,13 @@ async def list_clients(
         like = f"%{q.strip()}%"
         stmt = stmt.where((Client.name.ilike(like)) | (Client.phone.ilike(like)))
     res = await session.execute(stmt)
-    return [ClientOut.from_model(c) for c in res.scalars()]
+    clients = list(res.scalars())
+    blocked_list = await list_blocked_clients(session, master.id)
+    blocked_ids = {bc.tg_user_id for bc in blocked_list}
+    return [
+        ClientOut.from_model(c, blocked=bool(c.tg_user_id and c.tg_user_id in blocked_ids))
+        for c in clients
+    ]
 
 
 @router.post("", response_model=ClientOut, status_code=201)
@@ -176,3 +196,41 @@ async def delete_client(
         await session.delete(booking)
     await session.flush()
     await session.delete(client)
+
+
+@router.post("/block", status_code=201, response_model=BlockedClientOut)
+async def block_client_endpoint(
+    payload: BlockRequest,
+    master: Master = Depends(get_current_active_master),
+    session: AsyncSession = Depends(get_session),
+) -> BlockedClientOut:
+    bc = await block_client(session, master.id, payload.tg_user_id, payload.reason)
+    return BlockedClientOut(
+        tg_user_id=bc.tg_user_id, reason=bc.reason, blocked_at=bc.blocked_at
+    )
+
+
+@router.post("/unblock", status_code=200)
+async def unblock_client_endpoint(
+    payload: BlockRequest,
+    master: Master = Depends(get_current_active_master),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    removed = await unblock_client(session, master.id, payload.tg_user_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="client not blocked")
+    return {"success": True}
+
+
+@router.get("/blocked", response_model=list[BlockedClientOut])
+async def list_blocked_endpoint(
+    master: Master = Depends(get_current_active_master),
+    session: AsyncSession = Depends(get_session),
+) -> list[BlockedClientOut]:
+    blocked = await list_blocked_clients(session, master.id)
+    return [
+        BlockedClientOut(
+            tg_user_id=bc.tg_user_id, reason=bc.reason, blocked_at=bc.blocked_at
+        )
+        for bc in blocked
+    ]
