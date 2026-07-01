@@ -1489,18 +1489,14 @@ def build_dispatcher(
                     callback_data=f"sched:toggle:{weekday}",
                 )],
                 [
-                    InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:start:-60"),
                     InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:start:-30"),
-                    InlineKeyboardButton(text=f"🌅{start_hm}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text=f"🌅 {start_hm}", callback_data="sched:noop"),
                     InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:start:30"),
-                    InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:start:60"),
                 ],
                 [
-                    InlineKeyboardButton(text="⏪", callback_data=f"sched:adj:{weekday}:end:-60"),
                     InlineKeyboardButton(text="◀️", callback_data=f"sched:adj:{weekday}:end:-30"),
-                    InlineKeyboardButton(text=f"🌙{end_hm}", callback_data="sched:noop"),
+                    InlineKeyboardButton(text=f"🌙 {end_hm}", callback_data="sched:noop"),
                     InlineKeyboardButton(text="▶️", callback_data=f"sched:adj:{weekday}:end:30"),
-                    InlineKeyboardButton(text="⏩", callback_data=f"sched:adj:{weekday}:end:60"),
                 ],
                 [InlineKeyboardButton(text="◀️ К расписанию", callback_data="sched:back")],
             ]
