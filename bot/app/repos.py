@@ -16,6 +16,7 @@ from app.models import (
     Booking,
     Client,
     Master,
+    MasterBot,
     Service,
 )
 
@@ -164,6 +165,59 @@ async def list_active_services(session: AsyncSession, master_id: int) -> list[Se
         select(Service)
         .where(Service.master_id == master_id, Service.is_active.is_(True))
         .order_by(Service.id)
+    )
+    return list(res.scalars())
+
+
+# ---- MasterBot helpers ----
+
+
+async def get_master_bot(session: AsyncSession, master_id: int) -> MasterBot | None:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.master_id == master_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def get_master_bot_by_bot_id(session: AsyncSession, bot_id: int) -> MasterBot | None:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.bot_id == bot_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def create_master_bot(
+    session: AsyncSession,
+    *,
+    master_id: int,
+    bot_token: str,
+    bot_username: str,
+    bot_id: int,
+) -> MasterBot:
+    mb = MasterBot(
+        master_id=master_id,
+        bot_token=bot_token,
+        bot_username=bot_username,
+        bot_id=bot_id,
+        is_active=True,
+    )
+    session.add(mb)
+    await session.flush()
+    return mb
+
+
+async def delete_master_bot(session: AsyncSession, master_id: int) -> bool:
+    mb = await get_master_bot(session, master_id)
+    if mb is None:
+        return False
+    await session.delete(mb)
+    await session.flush()
+    return True
+
+
+async def list_active_master_bots(session: AsyncSession) -> list[MasterBot]:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.is_active.is_(True))
     )
     return list(res.scalars())
 

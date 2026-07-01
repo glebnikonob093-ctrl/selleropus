@@ -181,3 +181,23 @@ class MasterDailySummary(Base):
     __table_args__ = (
         UniqueConstraint("master_id", "day", name="uq_master_daily_summary"),
     )
+
+
+class MasterBot(Base):
+    """A per-master Telegram bot that clients use to book appointments.
+
+    Each master can optionally connect their own Telegram bot (created via
+    BotFather). The platform runs polling for all active master bots.
+    """
+
+    __tablename__ = "master_bots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), unique=True, index=True)
+    bot_token: Mapped[str] = mapped_column(String(100))
+    bot_username: Mapped[str] = mapped_column(String(64), default="")
+    bot_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    master: Mapped[Master] = relationship()

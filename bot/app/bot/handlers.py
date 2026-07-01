@@ -11,10 +11,12 @@ Two audiences share one bot:
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
-from aiogram import Dispatcher, F, Router
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -46,10 +48,19 @@ from app.models import (
 )
 from app.notifications import Notifier
 from app.repos import (
+    create_master_bot,
+    delete_master_bot,
+    get_master_bot,
+    get_master_bot_by_bot_id,
     get_master_by_slug,
     list_active_services,
     upsert_master_from_tg,
 )
+
+if TYPE_CHECKING:
+    from app.bot.multibot import MultiBotManager
+
+log = logging.getLogger(__name__)
 
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOK_DAYS_AHEAD = 14
@@ -164,6 +175,7 @@ def build_dispatcher(
     session_factory: async_sessionmaker[AsyncSession],
     notifier: Notifier | None = None,
     bot_username: str = "",
+    multibot_manager: MultiBotManager | None = None,
 ) -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     router = Router(name="clientika")
@@ -511,6 +523,17 @@ def build_dispatcher(
 
         master = await _ensure_master(message)
         link = _client_link(settings, bot_username, master)
+
+        # Check if master has a connected client bot
+        bot_line = ""
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+            if mb is not None:
+                bot_line = (
+                    f"\n🤖 Ваш бот для клиентов: @{mb.bot_username}\n"
+                    f"Ссылка: https://t.me/{mb.bot_username}\n"
+                )
+
         text = (
             f"Привет, {master.display_name}! 👋\n\n"
             "Это <b>Clientika</b> — ваш мини-CRM в Telegram:\n"
@@ -518,7 +541,12 @@ def build_dispatcher(
             "• автоматические напоминания клиентам,\n"
             "• статистика дохода за день/неделю/месяц.\n\n"
             f"Ваша ссылка для записи клиентов: <code>{link}</code>\n"
-            "Клиент откроет её и сам выберет — записаться в приложении или прямо в чате с ботом."
+            + bot_line
+            + (
+                "\nПодключите своего бота для записи клиентов: /addbot"
+                if not bot_line
+                else ""
+            )
         )
         await message.answer(
             text,
@@ -591,14 +619,143 @@ def build_dispatcher(
             "Команды бота:\n"
             "/start — приветствие и кнопка приложения\n"
             "/link — ваша ссылка для клиентов\n"
-            "/today — записи на сегодня\n",
+            "/today — записи на сегодня\n"
+            "/addbot <токен> — подключить бот для записи клиентов\n"
+            "/removebot — отключить бот для записи\n"
+            "/mybot — информация о подключённом боте",
             reply_markup=_open_app_keyboard(settings),
+        )
+
+    # ---- Master bot management -----------------------------------------------
+
+    @router.message(Command("addbot"))
+    async def on_addbot(message: Message, command: CommandObject) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer(
+                "Эта команда доступна только мастерам. "
+                "Нажмите /start чтобы зарегистрироваться."
+            )
+            return
+
+        token = (command.args or "").strip()
+        if not token:
+            await message.answer(
+                "Отправьте токен бота после команды:\n"
+                "<code>/addbot 123456789:ABCDefghIjklmnop</code>\n\n"
+                "Создать бота можно в @BotFather (команда /newbot).",
+                parse_mode="HTML",
+            )
+            return
+
+        # Validate the token via Telegram API
+        try:
+            temp_bot = Bot(token=token)
+            me = await temp_bot.get_me()
+            await temp_bot.session.close()
+        except Exception:
+            await message.answer(
+                "Не удалось подключиться с этим токеном. "
+                "Проверьте, что токен правильный и бот не заблокирован."
+            )
+            return
+
+        assert me.id is not None
+        assert me.username is not None
+
+        async with session_scope(session_factory) as session:
+            # Check if this bot_id is already used by another master
+            existing = await get_master_bot_by_bot_id(session, me.id)
+            if existing is not None and existing.master_id != master.id:
+                await message.answer(
+                    "Этот бот уже подключён к другому мастеру."
+                )
+                return
+
+            # Remove old bot if exists
+            old = await get_master_bot(session, master.id)
+            if old is not None:
+                if multibot_manager is not None:
+                    await multibot_manager.remove_bot(master.id)
+                await delete_master_bot(session, master.id)
+
+            await create_master_bot(
+                session,
+                master_id=master.id,
+                bot_token=token,
+                bot_username=me.username or "",
+                bot_id=me.id,
+            )
+
+        # Start polling for the new bot
+        if multibot_manager is not None:
+            await multibot_manager.add_bot(master.id, token)
+
+        await message.answer(
+            f"✅ Бот @{me.username} подключён!\n\n"
+            f"Клиенты теперь могут записываться через: https://t.me/{me.username}\n"
+            "Уведомления о записях будут приходить сюда.",
+            disable_web_page_preview=True,
+        )
+
+    @router.message(Command("removebot"))
+    async def on_removebot(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+            if mb is None:
+                await message.answer("У вас нет подключённого бота.")
+                return
+            bot_username = mb.bot_username
+            if multibot_manager is not None:
+                await multibot_manager.remove_bot(master.id)
+            await delete_master_bot(session, master.id)
+
+        await message.answer(
+            f"Бот @{bot_username} отключён. Клиенты больше не смогут "
+            "записываться через него."
+        )
+
+    @router.message(Command("mybot"))
+    async def on_mybot(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await message.answer("Эта команда доступна только мастерам.")
+            return
+
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+
+        if mb is None:
+            await message.answer(
+                "У вас нет подключённого бота.\n"
+                "Создайте бота в @BotFather и подключите:\n"
+                "<code>/addbot ТОКЕН</code>",
+                parse_mode="HTML",
+            )
+            return
+
+        running = multibot_manager.is_running(master.id) if multibot_manager else False
+        status = "✅ работает" if running else "⚠️ остановлен"
+        await message.answer(
+            f"Ваш бот: @{mb.bot_username}\n"
+            f"Статус: {status}\n"
+            f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
+            disable_web_page_preview=True,
         )
 
     @router.message(F.web_app_data)
     async def on_webapp_data(message: Message) -> None:
-        # Forward-compatible stub: Mini App uses the HTTP API, but if some
-        # workflow ever calls Telegram.WebApp.sendData() we don't crash.
         await message.answer("Принято.")
 
     dp.include_router(router)
