@@ -46,6 +46,7 @@ from app.models import (
     Booking,
     Client,
     Master,
+    MasterBot,
     Service,
 )
 from app.notifications import Notifier
@@ -63,7 +64,6 @@ from app.repos import (
     get_master_bot_by_bot_id,
     get_master_by_slug,
     get_revenue,
-    list_active_master_bots,
     list_active_services,
     list_all_masters,
     list_blocked_clients,
@@ -123,6 +123,9 @@ class BroadcastFlow(StatesGroup):
     text = State()
 
 
+_M_BTN_BACK = "◀️ Назад"
+
+
 def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
         [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_CLIENTS)],
@@ -133,6 +136,13 @@ def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     if is_admin:
         rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def _back_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text=_M_BTN_BACK)]],
+        resize_keyboard=True,
+    )
 
 
 def _client_link(settings: Settings, bot_username: str, master: Master) -> str:
@@ -617,18 +627,24 @@ def build_dispatcher(
             disable_web_page_preview=True,
         )
 
-    async def _show_link(message: Message, master: Master) -> None:
+    async def _show_link(
+        message: Message, master: Master, *, back_kb: bool = False
+    ) -> None:
         link = _client_link(settings, bot_username, master)
         is_admin = _is_admin(master.tg_user_id)
+        kb = _back_kb() if back_kb else _master_menu_kb(is_admin)
         await message.answer(
             f"Ваша персональная ссылка для клиентов:\n<code>{link}</code>",
             parse_mode="HTML",
-            reply_markup=_master_menu_kb(is_admin),
+            reply_markup=kb,
             disable_web_page_preview=True,
         )
 
-    async def _show_today(message: Message, master: Master) -> None:
+    async def _show_today(
+        message: Message, master: Master, *, back_kb: bool = False
+    ) -> None:
         is_admin = _is_admin(master.tg_user_id)
+        kb = _back_kb() if back_kb else _master_menu_kb(is_admin)
         async with session_scope(session_factory) as session:
             now = datetime.utcnow()
             day_start = datetime(now.year, now.month, now.day)
@@ -646,10 +662,7 @@ def build_dispatcher(
             rows = list((await session.execute(stmt)).all())
 
         if not rows:
-            await message.answer(
-                "На сегодня записей нет.",
-                reply_markup=_master_menu_kb(is_admin),
-            )
+            await message.answer("На сегодня записей нет.", reply_markup=kb)
             return
 
         lines = [f"<b>Сегодня записей: {len(rows)}</b>"]
@@ -660,9 +673,7 @@ def build_dispatcher(
                 + (f" ({client.phone})" if client.phone else "")
             )
         await message.answer(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=_master_menu_kb(is_admin),
+            "\n".join(lines), parse_mode="HTML", reply_markup=kb
         )
 
     @router.message(Command("link"))
@@ -928,6 +939,16 @@ def build_dispatcher(
 
     # ---- Master menu button handlers ------------------------------------------
 
+    @router.message(F.text == _M_BTN_BACK)
+    async def on_btn_back_to_menu(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        is_admin = _is_admin(from_user.id)
+        await message.answer(
+            "Главное меню:",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
     @router.message(F.text == _M_BTN_TODAY)
     async def on_btn_today(message: Message) -> None:
         from_user = message.from_user
@@ -935,7 +956,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-        await _show_today(message, master)
+        await _show_today(message, master, back_kb=True)
 
     @router.message(F.text == _M_BTN_CLIENTS)
     async def on_btn_clients(message: Message) -> None:
@@ -945,7 +966,6 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
-        is_admin = _is_admin(from_user.id)
         async with session_scope(session_factory) as session:
             clients = await list_clients_for_master(session, master.id)
             blocked_ids: set[int] = set()
@@ -956,7 +976,7 @@ def build_dispatcher(
         if not clients:
             await message.answer(
                 "У вас пока нет клиентов.",
-                reply_markup=_master_menu_kb(is_admin),
+                reply_markup=_back_kb(),
             )
             return
 
@@ -992,11 +1012,11 @@ def build_dispatcher(
             kb = InlineKeyboardMarkup(inline_keyboard=buttons) if buttons else None
             await message.answer(text, parse_mode="HTML", reply_markup=kb)
 
-        if len(clients) > 20:
-            await message.answer(
-                f"... и ещё {len(clients) - 20} клиентов",
-                reply_markup=_master_menu_kb(is_admin),
-            )
+        await message.answer(
+            f"Всего клиентов: {len(clients)}"
+            + (" (показаны первые 20)" if len(clients) > 20 else ""),
+            reply_markup=_back_kb(),
+        )
 
     @router.message(F.text == _M_BTN_STATS)
     async def on_btn_stats(message: Message) -> None:
@@ -1006,7 +1026,6 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
-        is_admin = _is_admin(from_user.id)
         now = datetime.utcnow()
         today_start = datetime(now.year, now.month, now.day)
         week_start = today_start - timedelta(days=today_start.weekday())
@@ -1041,7 +1060,7 @@ def build_dispatcher(
             f"• Неделя: {week_rev} ₽\n"
             f"• Месяц: {month_rev} ₽",
             parse_mode="HTML",
-            reply_markup=_master_menu_kb(is_admin),
+            reply_markup=_back_kb(),
         )
 
     @router.message(F.text == _M_BTN_LINK)
@@ -1051,7 +1070,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-        await _show_link(message, master)
+        await _show_link(message, master, back_kb=True)
 
     @router.message(F.text == _M_BTN_BOT)
     async def on_btn_bot(message: Message) -> None:
@@ -1061,7 +1080,6 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
-        is_admin = _is_admin(from_user.id)
         async with session_scope(session_factory) as session:
             mb = await get_master_bot(session, master.id)
 
@@ -1071,7 +1089,7 @@ def build_dispatcher(
                 "Создайте бота в @BotFather и подключите:\n"
                 "<code>/addbot ТОКЕН</code>",
                 parse_mode="HTML",
-                reply_markup=_master_menu_kb(is_admin),
+                reply_markup=_back_kb(),
             )
             return
 
@@ -1082,14 +1100,11 @@ def build_dispatcher(
             f"Статус: {status}\n"
             f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
             disable_web_page_preview=True,
-            reply_markup=_master_menu_kb(is_admin),
+            reply_markup=_back_kb(),
         )
 
     @router.message(F.text == _M_BTN_HELP)
     async def on_btn_help(message: Message) -> None:
-        from_user = message.from_user
-        assert from_user is not None
-        is_admin = _is_admin(from_user.id)
         await message.answer(
             "Команды бота:\n"
             "/start — приветствие и меню\n"
@@ -1101,7 +1116,7 @@ def build_dispatcher(
             "/block <tg_id> — заблокировать клиента\n"
             "/unblock <tg_id> — разблокировать клиента\n"
             "/blocked — список заблокированных",
-            reply_markup=_master_menu_kb(is_admin),
+            reply_markup=_back_kb(),
         )
 
     # ---- Blocked list button handler -------------------------------------------
@@ -1114,14 +1129,13 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
-        is_admin = _is_admin(from_user.id)
         async with session_scope(session_factory) as session:
             blocked = await list_blocked_clients(session, master.id)
 
         if not blocked:
             await message.answer(
                 "Нет заблокированных клиентов.",
-                reply_markup=_master_menu_kb(is_admin),
+                reply_markup=_back_kb(),
             )
             return
 
@@ -1315,6 +1329,17 @@ def build_dispatcher(
 
     # ---- Admin panel ----------------------------------------------------------
 
+    _ADM_PAGE_SIZE = 5
+
+    def _admin_menu_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="📊 Статистика платформы", callback_data="adm:stats")],
+                [InlineKeyboardButton(text="🤖 Боты и мастера", callback_data="adm:bots:0")],
+                [InlineKeyboardButton(text="📢 Рассылка мастерам", callback_data="adm:broadcast")],
+            ]
+        )
+
     @router.message(F.text == _M_BTN_ADMIN)
     async def on_btn_admin(message: Message) -> None:
         from_user = message.from_user
@@ -1322,17 +1347,9 @@ def build_dispatcher(
         if not _is_admin(from_user.id):
             return
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статистика платформы", callback_data="adm:stats")],
-                [InlineKeyboardButton(text="👥 Все мастера", callback_data="adm:masters")],
-                [InlineKeyboardButton(text="🤖 Все боты", callback_data="adm:bots")],
-                [InlineKeyboardButton(text="📢 Рассылка мастерам", callback_data="adm:broadcast")],
-            ]
-        )
         await message.answer(
             "👑 <b>Админ-панель Clientika</b>\n\nВыберите раздел:",
-            reply_markup=kb,
+            reply_markup=_admin_menu_kb(),
             parse_mode="HTML",
         )
 
@@ -1379,21 +1396,39 @@ def build_dispatcher(
         )
         await callback.answer()
 
-    @router.callback_query(F.data == "adm:masters")
-    async def on_admin_masters(callback: CallbackQuery) -> None:
+    @router.callback_query(F.data.startswith("adm:bots:"))
+    async def on_admin_bots_page(callback: CallbackQuery) -> None:
         from_user = callback.from_user
         if not _is_admin(from_user.id):
             await callback.answer("Нет доступа", show_alert=True)
             return
         assert isinstance(callback.message, Message)
 
+        page = int((callback.data or "adm:bots:0").split(":", 2)[2])
+
+        # Collect all masters with their bot info
         async with session_scope(session_factory) as session:
             masters = await list_all_masters(session)
-            master_data: list[tuple[int, str, str | None, int]] = []
+            items: list[tuple[int, str, str | None, int, str | None, bool]] = []
             for m in masters:
-                master_data.append((m.id, m.display_name, m.tg_username, m.tg_user_id))
+                bot_res = await session.execute(
+                    select(MasterBot).where(
+                        MasterBot.master_id == m.id, MasterBot.is_active.is_(True)
+                    )
+                )
+                mb = bot_res.scalar_one_or_none()
+                bot_un = mb.bot_username if mb else None
+                running = (
+                    multibot_manager.is_running(m.id)
+                    if multibot_manager and mb
+                    else False
+                )
+                items.append(
+                    (m.id, m.display_name, m.tg_username, m.tg_user_id, bot_un, running)
+                )
 
-        if not master_data:
+        total = len(items)
+        if total == 0:
             kb = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
@@ -1405,84 +1440,73 @@ def build_dispatcher(
             await callback.answer()
             return
 
-        # Send each master as a separate message with a delete button
-        await callback.message.edit_text(
-            f"<b>👥 Мастера ({len(master_data)}):</b>",
-            parse_mode="HTML",
-        )
-        for mid, name, tg_un, tg_uid in master_data[:20]:
-            tg_link = ""
+        total_pages = (total + _ADM_PAGE_SIZE - 1) // _ADM_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * _ADM_PAGE_SIZE
+        page_items = items[start : start + _ADM_PAGE_SIZE]
+
+        lines = [f"<b>🤖 Боты и мастера ({total}):</b>\n"]
+        for _mid, name, tg_un, tg_uid, bot_un, running in page_items:
+            master_link = ""
             if tg_un:
-                tg_link = f' · <a href="https://t.me/{tg_un}">@{tg_un}</a>'
-            text = f"<b>{name}</b>{tg_link}\nTG ID: <code>{tg_uid}</code>"
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🗑 Удалить мастера",
-                        callback_data=f"adm:delmaster:{mid}",
-                    )]
-                ]
+                master_link = f' · <a href="https://t.me/{tg_un}">@{tg_un}</a>'
+            bot_line = ""
+            if bot_un:
+                status = "✅" if running else "⚠️"
+                bot_line = (
+                    f"\n   🤖 <a href=\"https://t.me/{bot_un}\">@{bot_un}</a> {status}"
+                )
+            else:
+                bot_line = "\n   🤖 нет бота"
+            lines.append(
+                f"👤 <b>{name}</b>{master_link}\n"
+                f"   TG ID: <code>{tg_uid}</code>{bot_line}"
             )
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+
+        lines.append(f"\nСтраница {page + 1}/{total_pages} · Всего: {total}")
+
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton(text="◀️", callback_data=f"adm:bots:{page - 1}")
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                text=f"{page + 1}/{total_pages}", callback_data="adm:noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton(text="▶️", callback_data=f"adm:bots:{page + 1}")
+            )
+
+        del_rows: list[list[InlineKeyboardButton]] = [
+            [
+                InlineKeyboardButton(
+                    text=f"🗑 {name[:20]}",
+                    callback_data=f"adm:delmaster:{mid}",
+                )
+            ]
+            for mid, name, _tg_un, _tg_uid, _bot_un, _running in page_items
+        ]
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                nav_row,
+                *del_rows,
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
+            ]
+        )
+        await callback.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_web_page_preview=True,
+        )
         await callback.answer()
 
-    @router.callback_query(F.data == "adm:bots")
-    async def on_admin_bots(callback: CallbackQuery) -> None:
-        from_user = callback.from_user
-        if not _is_admin(from_user.id):
-            await callback.answer("Нет доступа", show_alert=True)
-            return
-        assert isinstance(callback.message, Message)
-
-        async with session_scope(session_factory) as session:
-            bots = await list_active_master_bots(session)
-            bot_data: list[tuple[str, int, str, str | None, int, bool]] = []
-            for mb in bots:
-                master_res = await session.execute(
-                    select(Master).where(Master.id == mb.master_id)
-                )
-                master_obj = master_res.scalar_one_or_none()
-                m_name = master_obj.display_name if master_obj else "?"
-                m_tg_un = master_obj.tg_username if master_obj else None
-                m_id = mb.master_id
-                running = multibot_manager.is_running(mb.master_id) if multibot_manager else False
-                bot_data.append((mb.bot_username, m_id, m_name, m_tg_un, mb.master_id, running))
-
-        if not bot_data:
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text="◀️ Назад", callback_data="adm:back")],
-                ]
-            )
-            await callback.message.edit_text(
-                "Нет активных ботов.", reply_markup=kb
-            )
-            await callback.answer()
-            return
-
-        await callback.message.edit_text(
-            f"<b>🤖 Боты ({len(bot_data)}):</b>",
-            parse_mode="HTML",
-        )
-        for bot_un, m_id, m_name, m_tg_un, _master_id, running in bot_data:
-            status = "✅ работает" if running else "⚠️ остановлен"
-            master_link = ""
-            if m_tg_un:
-                master_link = f' · <a href="https://t.me/{m_tg_un}">@{m_tg_un}</a>'
-            text = (
-                f"🤖 <a href=\"https://t.me/{bot_un}\">@{bot_un}</a> — {status}\n"
-                f"Мастер: <b>{m_name}</b>{master_link}\n"
-                f"Ссылка: https://t.me/{bot_un}"
-            )
-            kb = InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(
-                        text="🗑 Удалить мастера",
-                        callback_data=f"adm:delmaster:{m_id}",
-                    )]
-                ]
-            )
-            await callback.message.answer(text, parse_mode="HTML", reply_markup=kb)
+    @router.callback_query(F.data == "adm:noop")
+    async def on_admin_noop(callback: CallbackQuery) -> None:
         await callback.answer()
 
     @router.callback_query(F.data == "adm:broadcast")
@@ -1567,18 +1591,10 @@ def build_dispatcher(
             return
         assert isinstance(callback.message, Message)
 
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="📊 Статистика платформы", callback_data="adm:stats")],
-                [InlineKeyboardButton(text="👥 Все мастера", callback_data="adm:masters")],
-                [InlineKeyboardButton(text="🤖 Все боты", callback_data="adm:bots")],
-                [InlineKeyboardButton(text="📢 Рассылка мастерам", callback_data="adm:broadcast")],
-            ]
-        )
         await callback.message.edit_text(
             "👑 <b>Админ-панель Clientika</b>\n\nВыберите раздел:",
             parse_mode="HTML",
-            reply_markup=kb,
+            reply_markup=_admin_menu_kb(),
         )
         await callback.answer()
 
