@@ -2,11 +2,11 @@
 
 Each master can connect their own Telegram bot (via /addbot in the main bot).
 Clients interact with these bots to book appointments — everything is done
-via inline-keyboard buttons, no Mini App.
+via inline-keyboard buttons + a persistent bottom menu, no Mini App.
 
-The handlers are nearly identical to the referral booking flow in the main bot
-but scoped to a single master (the bot owner). Notifications about new bookings
-go to the master through the main Clientika bot.
+Flow:
+  /start → contact sharing (once) → persistent menu with three buttons:
+    📝 Записаться  |  📋 Мои записи  |  👤 Мой профиль
 """
 
 from __future__ import annotations
@@ -26,12 +26,12 @@ from aiogram.types import (
     KeyboardButton,
     Message,
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.booking import (
+    ACTIVE_BOOKING_STATUSES,
     PastBookingError,
     SlotUnavailableError,
     available_day_slots,
@@ -45,20 +45,45 @@ from app.models import (
     Service,
 )
 from app.notifications import Notifier
-from app.repos import list_active_services
+from app.repos import find_or_create_client, list_active_services
 
 log = logging.getLogger(__name__)
 
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOK_DAYS_AHEAD = 14
 
+# Persistent bottom-menu button labels
+_BTN_BOOK = "📝 Записаться"
+_BTN_MY_BOOKINGS = "📋 Мои записи"
+_BTN_MY_PROFILE = "👤 Мой профиль"
+
 
 class ClientBookingFlow(StatesGroup):
-    phone = State()     # first step: request contact
+    phone = State()
     service = State()
     day = State()
     slot = State()
     confirm = State()
+
+
+def _main_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=_BTN_BOOK), KeyboardButton(text=_BTN_MY_BOOKINGS)],
+            [KeyboardButton(text=_BTN_MY_PROFILE)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _phone_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]
+        ],
+        resize_keyboard=True,
+        one_time_keyboard=True,
+    )
 
 
 def _cancel_row() -> list[InlineKeyboardButton]:
@@ -119,11 +144,6 @@ def build_client_dispatcher(
     session_factory: async_sessionmaker[AsyncSession],
     main_notifier: Notifier | None = None,
 ) -> Dispatcher:
-    """Build a Dispatcher for a per-master client bot.
-
-    ``master_id`` is the DB id of the master who owns this bot.
-    ``main_notifier`` sends booking notifications through the main Clientika bot.
-    """
     dp = Dispatcher(storage=MemoryStorage())
     router = Router(name=f"client_bot_{master_id}")
 
@@ -131,32 +151,70 @@ def build_client_dispatcher(
         res = await session.execute(select(Master).where(Master.id == master_id))
         return res.scalar_one_or_none()
 
-    # ---- /start — request phone first ----
+    async def _get_client(session: AsyncSession, tg_user_id: int) -> Client | None:
+        res = await session.execute(
+            select(Client).where(
+                Client.master_id == master_id,
+                Client.tg_user_id == tg_user_id,
+            )
+        )
+        return res.scalar_one_or_none()
+
+    async def _start_booking(message: Message, state: FSMContext) -> None:
+        async with session_scope(session_factory) as session:
+            services = await list_active_services(session, master_id)
+        if not services:
+            await message.answer(
+                "Мастер пока не добавил(а) услуги. Попробуйте позже.",
+                reply_markup=_main_menu_kb(),
+            )
+            return
+        await state.set_state(ClientBookingFlow.service)
+        await message.answer(
+            "Выберите услугу:",
+            reply_markup=_services_keyboard(services),
+        )
+
+    # ---- /start ----
 
     @router.message(CommandStart())
     async def on_start(message: Message, state: FSMContext) -> None:
         await state.clear()
+        from_user = message.from_user
+        assert from_user is not None
+
         async with session_scope(session_factory) as session:
             master = await _get_master(session)
             if master is None:
                 await message.answer("Бот временно недоступен.")
                 return
             display_name = master.display_name
+            client = await _get_client(session, from_user.id)
+
+        if client is not None and client.phone:
+            await state.update_data(
+                master_id=master_id,
+                phone=client.phone,
+                name=client.name,
+                tg_user_id=from_user.id,
+                tg_username=from_user.username or None,
+            )
+            await message.answer(
+                f"Привет, {client.name}! 👋\n"
+                f"Запись к мастеру: <b>{display_name}</b>\n\n"
+                "Выберите действие в меню ниже.",
+                reply_markup=_main_menu_kb(),
+                parse_mode="HTML",
+            )
+            return
 
         await state.set_state(ClientBookingFlow.phone)
         await state.update_data(master_id=master_id, master_name=display_name)
-        kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
         await message.answer(
             f"Добро пожаловать! Запись к мастеру: <b>{display_name}</b>\n\n"
             "Для продолжения, пожалуйста, подтвердите ваш номер телефона, "
             "нажав кнопку ниже.",
-            reply_markup=kb,
+            reply_markup=_phone_kb(),
             parse_mode="HTML",
         )
 
@@ -168,7 +226,6 @@ def build_client_dispatcher(
         assert contact is not None
         from_user = message.from_user
 
-        # Anti-spam: only accept the user's own contact
         if from_user and contact.user_id != from_user.id:
             await message.answer(
                 "Пожалуйста, отправьте свой номер телефона, "
@@ -185,50 +242,154 @@ def build_client_dispatcher(
             if from_user
             else ""
         )
+        name = tg_name or "Клиент"
+
+        async with session_scope(session_factory) as session:
+            await find_or_create_client(
+                session,
+                master_id,
+                name=name,
+                phone=phone,
+                tg_user_id=from_user.id if from_user else None,
+                tg_username=(from_user.username if from_user else None) or None,
+            )
+
+        await state.clear()
         await state.update_data(
             phone=phone,
-            name=tg_name or "Клиент",
+            name=name,
             tg_user_id=from_user.id if from_user else None,
             tg_username=(from_user.username if from_user else None) or None,
         )
-
-        # Now show services
-        async with session_scope(session_factory) as session:
-            services = await list_active_services(session, master_id)
-
-        if not services:
-            data = await state.get_data()
-            await state.clear()
-            await message.answer(
-                f"Мастер {data.get('master_name', '')} пока не добавил(а) услуги. "
-                "Попробуйте позже.",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-            return
-
-        await state.set_state(ClientBookingFlow.service)
         await message.answer(
-            f"Спасибо! Номер {phone} принят.\n\nВыберите услугу:",
-            reply_markup=ReplyKeyboardRemove(),
-        )
-        await message.answer(
-            "Доступные услуги:",
-            reply_markup=_services_keyboard(services),
+            f"Спасибо, {name}! Номер {phone} сохранён.\n\n"
+            "Выберите действие в меню ниже.",
+            reply_markup=_main_menu_kb(),
         )
 
     @router.message(ClientBookingFlow.phone)
     async def on_phone_not_contact(message: Message, state: FSMContext) -> None:
-        kb = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]
-            ],
-            resize_keyboard=True,
-            one_time_keyboard=True,
-        )
         await message.answer(
             "Пожалуйста, нажмите кнопку ниже, чтобы поделиться номером телефона.",
-            reply_markup=kb,
+            reply_markup=_phone_kb(),
         )
+
+    # ---- Persistent menu buttons ----
+
+    @router.message(F.text == _BTN_BOOK)
+    async def on_menu_book(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        from_user = message.from_user
+        assert from_user is not None
+        data = await _ensure_client_data(message, state, from_user.id)
+        if data is None:
+            return
+        await _start_booking(message, state)
+
+    @router.message(F.text == _BTN_MY_BOOKINGS)
+    async def on_menu_my_bookings(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        from_user = message.from_user
+        assert from_user is not None
+        data = await _ensure_client_data(message, state, from_user.id)
+        if data is None:
+            return
+
+        now = datetime.utcnow()
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Booking, Service)
+                .join(Service, Booking.service_id == Service.id)
+                .where(
+                    Booking.master_id == master_id,
+                    Booking.starts_at >= now,
+                    Booking.status.in_(ACTIVE_BOOKING_STATUSES),
+                )
+                .order_by(Booking.starts_at)
+            )
+            rows = res.all()
+            client = await _get_client(session, from_user.id)
+
+        if client is None:
+            await message.answer("Записей не найдено.", reply_markup=_main_menu_kb())
+            return
+
+        bookings_for_client = [
+            (b, s) for b, s in rows if b.client_id == client.id
+        ]
+
+        if not bookings_for_client:
+            await message.answer(
+                "У вас пока нет предстоящих записей.\n"
+                f"Нажмите «{_BTN_BOOK}» чтобы записаться!",
+                reply_markup=_main_menu_kb(),
+            )
+            return
+
+        lines = ["<b>Ваши предстоящие записи:</b>\n"]
+        for booking, service in bookings_for_client:
+            dt = booking.starts_at
+            day_label = f"{_WEEKDAYS_RU[dt.weekday()]} {dt.strftime('%d.%m.%Y')}"
+            lines.append(
+                f"• {service.name} — {day_label} в {dt.strftime('%H:%M')}"
+            )
+        await message.answer(
+            "\n".join(lines),
+            reply_markup=_main_menu_kb(),
+            parse_mode="HTML",
+        )
+
+    @router.message(F.text == _BTN_MY_PROFILE)
+    async def on_menu_my_profile(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        from_user = message.from_user
+        assert from_user is not None
+
+        async with session_scope(session_factory) as session:
+            client = await _get_client(session, from_user.id)
+            master = await _get_master(session)
+
+        if client is None or not client.phone:
+            await state.set_state(ClientBookingFlow.phone)
+            await message.answer(
+                "Вы ещё не зарегистрированы. Поделитесь номером телефона:",
+                reply_markup=_phone_kb(),
+            )
+            return
+
+        master_name = master.display_name if master else "—"
+        await message.answer(
+            "<b>Ваш профиль:</b>\n\n"
+            f"Имя: {client.name}\n"
+            f"Телефон: {client.phone}\n"
+            f"Мастер: {master_name}",
+            reply_markup=_main_menu_kb(),
+            parse_mode="HTML",
+        )
+
+    async def _ensure_client_data(
+        message: Message, state: FSMContext, tg_user_id: int
+    ) -> dict[str, object] | None:
+        data = await state.get_data()
+        if data.get("phone"):
+            return data
+        async with session_scope(session_factory) as session:
+            client = await _get_client(session, tg_user_id)
+        if client is not None and client.phone:
+            from_user = message.from_user
+            await state.update_data(
+                phone=client.phone,
+                name=client.name,
+                tg_user_id=tg_user_id,
+                tg_username=(from_user.username if from_user else None) or None,
+            )
+            return await state.get_data()
+        await state.set_state(ClientBookingFlow.phone)
+        await message.answer(
+            "Сначала поделитесь номером телефона:",
+            reply_markup=_phone_kb(),
+        )
+        return None
 
     # ---- Service selection ----
 
@@ -283,7 +444,7 @@ def build_client_dispatcher(
             )
             service = res.scalar_one_or_none()
             if master is None or service is None:
-                await callback.answer("Сессия устарела, нажмите /start", show_alert=True)
+                await callback.answer("Сессия устарела", show_alert=True)
                 await state.clear()
                 return
             slots = await available_day_slots(session, master, service, day)
@@ -302,7 +463,7 @@ def build_client_dispatcher(
         )
         await callback.answer()
 
-    # ---- Slot selection → straight to confirm (name + phone already collected) ----
+    # ---- Slot selection → confirm ----
 
     @router.callback_query(ClientBookingFlow.slot, F.data.startswith("cbslot:"))
     async def on_pick_slot(callback: CallbackQuery, state: FSMContext) -> None:
@@ -310,7 +471,7 @@ def build_client_dispatcher(
         data = await state.get_data()
         day_iso = data.get("day")
         if not day_iso:
-            await callback.answer("Сессия устарела, нажмите /start", show_alert=True)
+            await callback.answer("Сессия устарела", show_alert=True)
             await state.clear()
             return
         starts_at = datetime.fromisoformat(f"{day_iso}T{hhmm}:00")
@@ -364,7 +525,7 @@ def build_client_dispatcher(
             )
             service = res.scalar_one_or_none()
             if master is None or service is None or not service.is_active:
-                error = "Запись недоступна. Нажмите /start чтобы начать заново."
+                error = "Запись недоступна."
             else:
                 try:
                     booking, client = await create_client_booking(
@@ -410,8 +571,7 @@ def build_client_dispatcher(
             f"  {service_obj.name}\n"
             f"  {booking_obj.starts_at.strftime('%d.%m.%Y %H:%M')}\n"
             f"  Мастер: {master_obj.display_name}\n\n"
-            "Мастер получит уведомление и свяжется при необходимости.\n"
-            "Нажмите /start чтобы записаться снова."
+            "Мастер получит уведомление и свяжется при необходимости."
         )
         await callback.answer()
 
@@ -421,12 +581,10 @@ def build_client_dispatcher(
     async def on_cancel(callback: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         assert isinstance(callback.message, Message)
-        await callback.message.edit_text(
-            "Запись отменена. Нажмите /start чтобы начать заново."
-        )
+        await callback.message.edit_text("Запись отменена.")
         await callback.answer()
 
-    # ---- Today command for info ----
+    # ---- Fallback ----
 
     @router.message(F.text)
     async def on_fallback(message: Message, state: FSMContext) -> None:
@@ -434,7 +592,8 @@ def build_client_dispatcher(
         if current_state is not None:
             return
         await message.answer(
-            "Нажмите /start чтобы записаться к мастеру."
+            "Выберите действие в меню ниже.",
+            reply_markup=_main_menu_kb(),
         )
 
     dp.include_router(router)
