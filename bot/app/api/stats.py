@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_master, get_session
+from app.api.deps import get_current_active_master, get_session
 from app.models import (
     BOOKING_STATUS_CAME,
     Booking,
@@ -60,7 +60,7 @@ def _period_window(period: str) -> tuple[datetime, datetime]:
 @router.get("", response_model=StatsResponse)
 async def get_stats(
     period: str = "month",
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> StatsResponse:
     start, end = _period_window(period)
@@ -137,7 +137,7 @@ class ReturnClientItem(BaseModel):
 @router.get("/return-clients", response_model=list[ReturnClientItem])
 async def get_return_clients(
     threshold_days: int = 30,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> list[ReturnClientItem]:
     clients: list[Client] = await find_clients_to_return(

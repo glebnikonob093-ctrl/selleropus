@@ -98,22 +98,12 @@ def _open_app_keyboard(settings: Settings) -> InlineKeyboardMarkup | None:
     )
 
 
-def _client_choice_keyboard(settings: Settings, slug: str) -> InlineKeyboardMarkup:
-    rows: list[list[InlineKeyboardButton]] = []
-    url = _miniapp_url(settings, slug)
-    if url:
-        rows.append(
-            [
-                InlineKeyboardButton(
-                    text="📱 Записаться в приложении",
-                    web_app=WebAppInfo(url=url),
-                )
-            ]
-        )
-    rows.append(
-        [InlineKeyboardButton(text="💬 Записаться в чате", callback_data=f"bkgo:{slug}")]
+def _client_choice_keyboard(slug: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Записаться", callback_data=f"bkgo:{slug}")]
+        ]
     )
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _cancel_row() -> list[InlineKeyboardButton]:
@@ -238,8 +228,8 @@ def build_dispatcher(
         await state.update_data(master_slug=slug)
         await message.answer(
             f"Запись к мастеру: <b>{display_name}</b>\n\n"
-            "Как вам удобнее записаться?",
-            reply_markup=_client_choice_keyboard(settings, slug),
+            "Нажмите кнопку ниже, чтобы выбрать услугу и время.",
+            reply_markup=_client_choice_keyboard(slug),
             parse_mode="HTML",
         )
 
@@ -377,14 +367,9 @@ def build_dispatcher(
 
     async def _ask_phone(message: Message, state: FSMContext) -> None:
         await state.set_state(BookingFlow.phone)
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="Пропустить", callback_data="bkphone")],
-                _cancel_row(),
-            ]
-        )
+        kb = InlineKeyboardMarkup(inline_keyboard=[_cancel_row()])
         await message.answer(
-            "Оставьте телефон для связи (текстом) или нажмите «Пропустить».",
+            "Напишите ваш номер телефона для связи.",
             reply_markup=kb,
         )
 
@@ -427,13 +412,6 @@ def build_dispatcher(
             ]
         )
         await message.answer("\n".join(lines), reply_markup=kb)
-
-    @router.callback_query(BookingFlow.phone, F.data == "bkphone")
-    async def on_phone_skip(callback: CallbackQuery, state: FSMContext) -> None:
-        await state.update_data(phone=None)
-        assert isinstance(callback.message, Message)
-        await _show_confirm(callback.message, state)
-        await callback.answer()
 
     @router.message(BookingFlow.phone, F.text)
     async def on_phone_text(message: Message, state: FSMContext) -> None:
