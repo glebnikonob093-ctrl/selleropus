@@ -23,7 +23,10 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -51,11 +54,10 @@ _BOOK_DAYS_AHEAD = 14
 
 
 class ClientBookingFlow(StatesGroup):
+    phone = State()     # first step: request contact
     service = State()
     day = State()
     slot = State()
-    name = State()
-    phone = State()
     confirm = State()
 
 
@@ -129,7 +131,7 @@ def build_client_dispatcher(
         res = await session.execute(select(Master).where(Master.id == master_id))
         return res.scalar_one_or_none()
 
-    # ---- /start — greeting with service list ----
+    # ---- /start — request phone first ----
 
     @router.message(CommandStart())
     async def on_start(message: Message, state: FSMContext) -> None:
@@ -140,21 +142,92 @@ def build_client_dispatcher(
                 await message.answer("Бот временно недоступен.")
                 return
             display_name = master.display_name
-            services = await list_active_services(session, master.id)
+
+        await state.set_state(ClientBookingFlow.phone)
+        await state.update_data(master_id=master_id, master_name=display_name)
+        kb = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await message.answer(
+            f"Добро пожаловать! Запись к мастеру: <b>{display_name}</b>\n\n"
+            "Для продолжения, пожалуйста, подтвердите ваш номер телефона, "
+            "нажав кнопку ниже.",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+
+    # ---- Phone via Telegram contact ----
+
+    @router.message(ClientBookingFlow.phone, F.contact)
+    async def on_contact_shared(message: Message, state: FSMContext) -> None:
+        contact = message.contact
+        assert contact is not None
+        from_user = message.from_user
+
+        # Anti-spam: only accept the user's own contact
+        if from_user and contact.user_id != from_user.id:
+            await message.answer(
+                "Пожалуйста, отправьте свой номер телефона, "
+                "а не чужой контакт.",
+            )
+            return
+
+        phone = contact.phone_number
+        if not phone.startswith("+"):
+            phone = f"+{phone}"
+
+        tg_name = (
+            f"{from_user.first_name or ''} {from_user.last_name or ''}".strip()
+            if from_user
+            else ""
+        )
+        await state.update_data(
+            phone=phone,
+            name=tg_name or "Клиент",
+            tg_user_id=from_user.id if from_user else None,
+            tg_username=(from_user.username if from_user else None) or None,
+        )
+
+        # Now show services
+        async with session_scope(session_factory) as session:
+            services = await list_active_services(session, master_id)
 
         if not services:
+            data = await state.get_data()
+            await state.clear()
             await message.answer(
-                f"Мастер {display_name} пока не добавил(а) услуги. Попробуйте позже."
+                f"Мастер {data.get('master_name', '')} пока не добавил(а) услуги. "
+                "Попробуйте позже.",
+                reply_markup=ReplyKeyboardRemove(),
             )
             return
 
         await state.set_state(ClientBookingFlow.service)
-        await state.update_data(master_id=master_id)
         await message.answer(
-            f"Добро пожаловать! Запись к мастеру: <b>{display_name}</b>\n\n"
-            "Выберите услугу:",
+            f"Спасибо! Номер {phone} принят.\n\nВыберите услугу:",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        await message.answer(
+            "Доступные услуги:",
             reply_markup=_services_keyboard(services),
-            parse_mode="HTML",
+        )
+
+    @router.message(ClientBookingFlow.phone)
+    async def on_phone_not_contact(message: Message, state: FSMContext) -> None:
+        kb = ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📱 Поделиться номером телефона", request_contact=True)]
+            ],
+            resize_keyboard=True,
+            one_time_keyboard=True,
+        )
+        await message.answer(
+            "Пожалуйста, нажмите кнопку ниже, чтобы поделиться номером телефона.",
+            reply_markup=kb,
         )
 
     # ---- Service selection ----
@@ -229,7 +302,7 @@ def build_client_dispatcher(
         )
         await callback.answer()
 
-    # ---- Slot selection ----
+    # ---- Slot selection → straight to confirm (name + phone already collected) ----
 
     @router.callback_query(ClientBookingFlow.slot, F.data.startswith("cbslot:"))
     async def on_pick_slot(callback: CallbackQuery, state: FSMContext) -> None:
@@ -242,64 +315,9 @@ def build_client_dispatcher(
             return
         starts_at = datetime.fromisoformat(f"{day_iso}T{hhmm}:00")
         await state.update_data(starts_at=starts_at.isoformat())
-        await state.set_state(ClientBookingFlow.name)
-
-        from_user = callback.from_user
-        tg_name = (
-            f"{from_user.first_name or ''} {from_user.last_name or ''}".strip()
-            if from_user
-            else ""
-        )
-        rows: list[list[InlineKeyboardButton]] = []
-        if tg_name:
-            rows.append(
-                [InlineKeyboardButton(text=f"Использовать: {tg_name}", callback_data="cbname")]
-            )
-        rows.append(_cancel_row())
         assert isinstance(callback.message, Message)
-        await callback.message.edit_text(
-            "Как вас записать? Напишите имя сообщением"
-            + (" или нажмите кнопку ниже." if tg_name else "."),
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
-        )
+        await _show_confirm(callback.message, state)
         await callback.answer()
-
-    # ---- Name ----
-
-    @router.callback_query(ClientBookingFlow.name, F.data == "cbname")
-    async def on_name_from_tg(callback: CallbackQuery, state: FSMContext) -> None:
-        from_user = callback.from_user
-        name = (
-            f"{from_user.first_name or ''} {from_user.last_name or ''}".strip()
-            if from_user
-            else ""
-        )
-        await state.update_data(name=name or "Клиент")
-        assert isinstance(callback.message, Message)
-        await _ask_phone(callback.message, state)
-        await callback.answer()
-
-    @router.message(ClientBookingFlow.name, F.text)
-    async def on_name_text(message: Message, state: FSMContext) -> None:
-        name = (message.text or "").strip()[:120] or "Клиент"
-        await state.update_data(name=name)
-        await _ask_phone(message, state)
-
-    # ---- Phone (required) ----
-
-    async def _ask_phone(message: Message, state: FSMContext) -> None:
-        await state.set_state(ClientBookingFlow.phone)
-        kb = InlineKeyboardMarkup(inline_keyboard=[_cancel_row()])
-        await message.answer(
-            "Напишите ваш номер телефона для связи.",
-            reply_markup=kb,
-        )
-
-    @router.message(ClientBookingFlow.phone, F.text)
-    async def on_phone_text(message: Message, state: FSMContext) -> None:
-        phone = (message.text or "").strip()[:40] or None
-        await state.update_data(phone=phone)
-        await _show_confirm(message, state)
 
     # ---- Confirmation ----
 
@@ -327,7 +345,6 @@ def build_client_dispatcher(
     @router.callback_query(ClientBookingFlow.confirm, F.data == "cbok")
     async def on_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         data = await state.get_data()
-        from_user = callback.from_user
         starts_at = datetime.fromisoformat(data["starts_at"])
         assert isinstance(callback.message, Message)
 
@@ -357,8 +374,8 @@ def build_client_dispatcher(
                         starts_at=starts_at,
                         name=data.get("name", "Клиент"),
                         phone=data.get("phone"),
-                        tg_user_id=from_user.id if from_user else None,
-                        tg_username=(from_user.username if from_user else None) or None,
+                        tg_user_id=data.get("tg_user_id"),
+                        tg_username=data.get("tg_username"),
                         source="master_bot",
                     )
                 except PastBookingError:
