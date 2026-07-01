@@ -137,6 +137,10 @@ async def get_client(
 ) -> ClientDetail:
     client = await _get_owned_client(session, master, client_id)
 
+    blocked_list = await list_blocked_clients(session, master.id)
+    blocked_ids = {bc.tg_user_id for bc in blocked_list}
+    is_blocked = bool(client.tg_user_id and client.tg_user_id in blocked_ids)
+
     res = await session.execute(
         select(Booking, Service.name)
         .join(Service, Service.id == Booking.service_id)
@@ -157,7 +161,7 @@ async def get_client(
     ]
 
     return ClientDetail(
-        **ClientOut.from_model(client).model_dump(),
+        **ClientOut.from_model(client, blocked=is_blocked).model_dump(),
         bookings=history,
     )
 

@@ -992,18 +992,9 @@ def build_dispatcher(
         lines = [f"<b>👥 Клиенты ({total}):</b>\n"]
         for c in page_items:
             is_blocked = bool(c.tg_user_id and c.tg_user_id in blocked_ids)
-            tg_link = ""
-            if c.tg_username:
-                username = c.tg_username.lstrip("@")
-                tg_link = f' · <a href="https://t.me/{username}">@{username}</a>'
-            tg_id_line = ""
-            if c.tg_user_id:
-                tg_id_line = f"\n   TG ID: <code>{c.tg_user_id}</code>"
-            phone_line = f"\n   Тел: {c.phone}" if c.phone else ""
             status_icon = " 🚫" if is_blocked else ""
-            lines.append(
-                f"👤 <b>{c.name}</b>{status_icon}{tg_link}{phone_line}{tg_id_line}"
-            )
+            note_icon = " 📝" if c.notes else ""
+            lines.append(f"👤 <b>{c.name}</b>{status_icon}{note_icon}")
 
         lines.append(f"\nСтраница {page + 1}/{total_pages} · Всего: {total}")
 
@@ -1022,28 +1013,115 @@ def build_dispatcher(
                 InlineKeyboardButton(text="▶️", callback_data=f"mclients:{page + 1}")
             )
 
-        blk_rows: list[list[InlineKeyboardButton]] = []
+        detail_rows: list[list[InlineKeyboardButton]] = []
         for c in page_items:
-            if not c.tg_user_id:
-                continue
-            is_blocked = bool(c.tg_user_id in blocked_ids)
+            detail_rows.append([
+                InlineKeyboardButton(
+                    text=f"📋 {c.name[:25]}",
+                    callback_data=f"mcdet:{c.id}:{page}",
+                )
+            ])
+
+        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row, *detail_rows])
+        return "\n".join(lines), kb
+
+    _STATUS_LABELS_RU = {
+        "new": "Новая",
+        "confirmed": "Подтверждена",
+        "came": "Пришёл",
+        "cancelled": "Отменена",
+        "no_show": "Не пришёл",
+    }
+
+    async def _show_client_detail(
+        message: Message, master_id: int, client_id: int, back_page: int
+    ) -> None:
+        """Show a detailed client card: notes, booking history, stats."""
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Client).where(
+                    Client.id == client_id, Client.master_id == master_id
+                )
+            )
+            client = res.scalar_one_or_none()
+            if client is None:
+                await message.edit_text("Клиент не найден.")
+                return
+
+            bookings_res = await session.execute(
+                select(Booking, Service.name)
+                .join(Service, Service.id == Booking.service_id)
+                .where(Booking.client_id == client.id)
+                .order_by(Booking.starts_at.desc())
+            )
+            bookings_rows = bookings_res.all()
+
+            blocked_list = await list_blocked_clients(session, master_id)
+            blocked_ids = {bc.tg_user_id for bc in blocked_list}
+
+        is_blocked = bool(client.tg_user_id and client.tg_user_id in blocked_ids)
+
+        lines = [f"<b>👤 {client.name}</b>"]
+        if is_blocked:
+            lines[0] += " 🚫"
+        if client.phone:
+            lines.append(f"📱 {client.phone}")
+        if client.tg_username:
+            username = client.tg_username.lstrip("@")
+            lines.append(f'💬 <a href="https://t.me/{username}">@{username}</a>')
+        if client.tg_user_id:
+            lines.append(f"🆔 <code>{client.tg_user_id}</code>")
+        if client.notes:
+            lines.append(f"\n📝 <i>{client.notes}</i>")
+
+        total_bookings = len(bookings_rows)
+        came_count = sum(1 for b, _ in bookings_rows if b.status == "came")
+        total_revenue = sum(b.price_snapshot for b, _ in bookings_rows if b.status == "came")
+        cancelled_count = sum(
+            1 for b, _ in bookings_rows if b.status in ("cancelled", "no_show")
+        )
+
+        lines.append("\n<b>📊 Статистика:</b>")
+        lines.append(f"Всего записей: {total_bookings}")
+        lines.append(f"Пришёл: {came_count}")
+        lines.append(f"Отменил/не пришёл: {cancelled_count}")
+        lines.append(f"Доход: {total_revenue} ₽")
+
+        if bookings_rows:
+            lines.append("\n<b>📋 Последние записи:</b>")
+            for b, svc_name in bookings_rows[:5]:
+                dt = b.starts_at.strftime("%d.%m %H:%M")
+                status_label = _STATUS_LABELS_RU.get(b.status, b.status)
+                lines.append(f"• {dt} — {svc_name} ({status_label})")
+
+        buttons: list[list[InlineKeyboardButton]] = []
+        if client.tg_user_id:
             if is_blocked:
-                blk_rows.append([
+                buttons.append([
                     InlineKeyboardButton(
-                        text=f"✅ {c.name[:20]}",
-                        callback_data=f"munblk:{c.tg_user_id}",
+                        text="✅ Разблокировать",
+                        callback_data=f"mcdunblk:{client.id}:{back_page}",
                     )
                 ])
             else:
-                blk_rows.append([
+                buttons.append([
                     InlineKeyboardButton(
-                        text=f"🚫 {c.name[:20]}",
-                        callback_data=f"mblk:{c.tg_user_id}",
+                        text="🚫 Заблокировать",
+                        callback_data=f"mcdblk:{client.id}:{back_page}",
                     )
                 ])
+        buttons.append([
+            InlineKeyboardButton(
+                text="◀️ К списку",
+                callback_data=f"mclients:{back_page}",
+            )
+        ])
 
-        kb = InlineKeyboardMarkup(inline_keyboard=[nav_row, *blk_rows])
-        return "\n".join(lines), kb
+        kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await message.edit_text(
+            "\n".join(lines), parse_mode="HTML", reply_markup=kb,
+            disable_web_page_preview=True,
+        )
 
     @router.message(F.text == _M_BTN_CLIENTS)
     async def on_btn_clients(message: Message) -> None:
@@ -1083,6 +1161,66 @@ def build_dispatcher(
     @router.callback_query(F.data == "mcl:noop")
     async def on_clients_noop(callback: CallbackQuery) -> None:
         await callback.answer()
+
+    @router.callback_query(F.data.startswith("mcdet:"))
+    async def on_client_detail(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        parts = (callback.data or "").split(":")
+        client_id = int(parts[1])
+        back_page = int(parts[2]) if len(parts) > 2 else 0
+        await _show_client_detail(callback.message, master.id, client_id, back_page)
+        await callback.answer()
+
+    @router.callback_query(F.data.startswith("mcdblk:"))
+    async def on_client_detail_block(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        parts = (callback.data or "").split(":")
+        client_id = int(parts[1])
+        back_page = int(parts[2]) if len(parts) > 2 else 0
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Client).where(
+                    Client.id == client_id, Client.master_id == master.id
+                )
+            )
+            client = res.scalar_one_or_none()
+            if client and client.tg_user_id:
+                await block_client(session, master.id, client.tg_user_id)
+        await _show_client_detail(callback.message, master.id, client_id, back_page)
+        await callback.answer("Заблокирован", show_alert=True)
+
+    @router.callback_query(F.data.startswith("mcdunblk:"))
+    async def on_client_detail_unblock(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+        parts = (callback.data or "").split(":")
+        client_id = int(parts[1])
+        back_page = int(parts[2]) if len(parts) > 2 else 0
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Client).where(
+                    Client.id == client_id, Client.master_id == master.id
+                )
+            )
+            client = res.scalar_one_or_none()
+            if client and client.tg_user_id:
+                await unblock_client(session, master.id, client.tg_user_id)
+        await _show_client_detail(callback.message, master.id, client_id, back_page)
+        await callback.answer("Разблокирован", show_alert=True)
 
     @router.message(F.text == _M_BTN_STATS)
     async def on_btn_stats(message: Message) -> None:
