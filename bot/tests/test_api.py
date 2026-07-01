@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.api import create_api_app
 from app.config import Settings
+from app.models import Master
+from app.repos import generate_unique_slug
 
 BOT_TOKEN = "1234:ABC"
 
@@ -70,17 +72,38 @@ def notifier() -> _RecordingNotifier:
     return _RecordingNotifier()
 
 
+MASTER = {"id": 100, "first_name": "Anna", "username": "annab"}
+
+
+@pytest.fixture()
+async def _seed_master(session_factory: async_sessionmaker[AsyncSession]) -> None:
+    """Pre-create a master row with is_master=True so CRM endpoints are accessible."""
+    async with session_factory() as s:
+        slug = await generate_unique_slug(s, "annab")
+        s.add(
+            Master(
+                tg_user_id=MASTER["id"],
+                tg_chat_id=MASTER["id"],
+                tg_username=MASTER["username"],
+                display_name=MASTER["first_name"],
+                slug=slug,
+                is_master=True,
+                timezone="UTC",
+            )
+        )
+        await s.commit()
+
+
 @pytest.fixture()
 def client(
-    session_factory: async_sessionmaker[AsyncSession], notifier: _RecordingNotifier
+    session_factory: async_sessionmaker[AsyncSession],
+    notifier: _RecordingNotifier,
+    _seed_master: None,
 ) -> TestClient:
     app = create_api_app(
         settings=_settings(), session_factory=session_factory, notifier=notifier
     )
     return TestClient(app)
-
-
-MASTER = {"id": 100, "first_name": "Anna", "username": "annab"}
 
 
 def test_app_builds_and_health(client: TestClient) -> None:

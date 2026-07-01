@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_master, get_session
+from app.api.deps import get_current_active_master, get_session
 from app.models import Booking, Client, Master, Service
 
 router = APIRouter(prefix="/api/clients", tags=["clients"])
@@ -79,7 +79,7 @@ async def _get_owned_client(
 
 @router.get("", response_model=list[ClientOut])
 async def list_clients(
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
     q: str | None = None,
 ) -> list[ClientOut]:
@@ -94,7 +94,7 @@ async def list_clients(
 @router.post("", response_model=ClientOut, status_code=201)
 async def create_client(
     payload: ClientCreate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ClientOut:
     client = Client(
@@ -112,7 +112,7 @@ async def create_client(
 @router.get("/{client_id}", response_model=ClientDetail)
 async def get_client(
     client_id: int,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ClientDetail:
     client = await _get_owned_client(session, master, client_id)
@@ -146,7 +146,7 @@ async def get_client(
 async def update_client(
     client_id: int,
     payload: ClientUpdate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ClientOut:
     client = await _get_owned_client(session, master, client_id)
@@ -164,7 +164,7 @@ async def update_client(
 @router.delete("/{client_id}", status_code=204, response_model=None)
 async def delete_client(
     client_id: int,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     client = await _get_owned_client(session, master, client_id)
