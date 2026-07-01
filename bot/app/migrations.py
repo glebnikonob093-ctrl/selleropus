@@ -21,6 +21,7 @@ async def create_all(engine: AsyncEngine) -> None:
 
     await _add_is_master_column(engine)
     await _add_book_days_ahead_column(engine)
+    await _add_header_image_id_column(engine)
 
 
 async def _add_is_master_column(engine: AsyncEngine) -> None:
@@ -45,5 +46,17 @@ async def _add_book_days_ahead_column(engine: AsyncEngine) -> None:
                 text("ALTER TABLE masters ADD COLUMN book_days_ahead INTEGER DEFAULT 30")
             )
             log.info("Added book_days_ahead column to masters table")
+        except Exception:
+            pass  # column already exists
+
+
+async def _add_header_image_id_column(engine: AsyncEngine) -> None:
+    """Idempotent ALTER: add ``header_image_id`` column to masters."""
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE masters ADD COLUMN header_image_id VARCHAR(256)")
+            )
+            log.info("Added header_image_id column to masters table")
         except Exception:
             pass  # column already exists

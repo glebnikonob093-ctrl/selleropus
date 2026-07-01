@@ -53,7 +53,6 @@ async function request<T>(
 
 export const api = {
   getMe: () => request<Me>("GET", "/api/me"),
-  updateMe: (payload: Partial<Me>) => request<Me>("PATCH", "/api/me", payload),
 
   listServices: (includeHidden = false) =>
     request<Service[]>(

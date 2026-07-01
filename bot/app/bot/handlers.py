@@ -97,6 +97,7 @@ _M_BTN_BOT = "🤖 Мой бот"
 _M_BTN_BLOCKED = "🚫 Заблокированные"
 _M_BTN_TEAM = "👥 Команда"
 _M_BTN_SCHEDULE = "⏰ Расписание"
+_M_BTN_HEADER = "🖼 Шапка"
 _M_BTN_HELP = "❓ Помощь"
 _M_BTN_ADMIN = "👑 Админ-панель"
 
@@ -124,6 +125,12 @@ class TeamFlow(StatesGroup):
     tg_id = State()
 
 
+class HeaderFlow(StatesGroup):
+    """States for uploading a header image."""
+
+    photo = State()
+
+
 class BroadcastFlow(StatesGroup):
     """States for admin broadcast."""
 
@@ -139,7 +146,7 @@ def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
         [KeyboardButton(text=_M_BTN_STATS), KeyboardButton(text=_M_BTN_LINK)],
         [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_BLOCKED)],
         [KeyboardButton(text=_M_BTN_TEAM), KeyboardButton(text=_M_BTN_SCHEDULE)],
-        [KeyboardButton(text=_M_BTN_HELP)],
+        [KeyboardButton(text=_M_BTN_HEADER), KeyboardButton(text=_M_BTN_HELP)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
@@ -648,11 +655,20 @@ def build_dispatcher(
             disable_web_page_preview=True,
         )
 
+    async def _send_header(message: Message, master: Master) -> None:
+        """Send master's header image if set."""
+        if master.header_image_id:
+            try:
+                await message.answer_photo(photo=master.header_image_id)
+            except Exception:
+                pass
+
     async def _show_today(
         message: Message, master: Master, *, back_kb: bool = False
     ) -> None:
         is_admin = _is_admin(master.tg_user_id)
         kb = _back_kb() if back_kb else _master_menu_kb(is_admin)
+        await _send_header(message, master)
         async with session_scope(session_factory) as session:
             now = datetime.utcnow()
             day_start = datetime(now.year, now.month, now.day)
@@ -948,9 +964,10 @@ def build_dispatcher(
     # ---- Master menu button handlers ------------------------------------------
 
     @router.message(F.text == _M_BTN_BACK)
-    async def on_btn_back_to_menu(message: Message) -> None:
+    async def on_btn_back_to_menu(message: Message, state: FSMContext) -> None:
         from_user = message.from_user
         assert from_user is not None
+        await state.clear()
         is_admin = _is_admin(from_user.id)
         await message.answer(
             "Главное меню:",
@@ -1131,6 +1148,7 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
+        await _send_header(message, master)
         text, kb = await _build_clients_page(master.id, 0)
         await message.answer(
             text,
@@ -1230,6 +1248,7 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
 
+        await _send_header(message, master)
         now = datetime.utcnow()
         today_start = datetime(now.year, now.month, now.day)
         week_start = today_start - timedelta(days=today_start.weekday())
@@ -1322,6 +1341,88 @@ def build_dispatcher(
             "/blocked — список заблокированных",
             reply_markup=_back_kb(),
         )
+
+    # ---- Header image management ------------------------------------------------
+
+    @router.message(F.text == _M_BTN_HEADER)
+    async def on_btn_header(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        if master.header_image_id:
+            await message.answer_photo(
+                photo=master.header_image_id,
+                caption="Текущая шапка.\nОтправьте новое фото или нажмите кнопку ниже.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(
+                        text="🗑 Удалить шапку",
+                        callback_data="header:remove",
+                    )],
+                ]),
+            )
+        else:
+            await message.answer(
+                "У вас пока нет шапки.\n"
+                "Отправьте фото — оно будет отображаться в разделах бота.",
+            )
+        await state.set_state(HeaderFlow.photo)
+        await message.answer("📸 Отправьте фото для шапки:", reply_markup=_back_kb())
+
+    @router.message(HeaderFlow.photo, F.photo)
+    async def on_header_photo(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        photo = message.photo[-1]
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Master).where(Master.id == master.id)
+            )
+            m = res.scalar_one()
+            m.header_image_id = photo.file_id
+
+        await state.clear()
+        is_admin = from_user.id == settings.admin_tg_id
+        await message.answer(
+            "✅ Шапка установлена!",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+
+    @router.message(HeaderFlow.photo)
+    async def on_header_not_photo(message: Message) -> None:
+        if message.text == _M_BTN_BACK:
+            return
+        await message.answer("Пожалуйста, отправьте фото (не файл, не текст).")
+
+    @router.callback_query(F.data == "header:remove")
+    async def on_header_remove(callback: CallbackQuery, state: FSMContext) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Master).where(Master.id == master.id)
+            )
+            m = res.scalar_one()
+            m.header_image_id = None
+
+        await state.clear()
+        is_admin = from_user.id == settings.admin_tg_id
+        assert isinstance(callback.message, Message)
+        await callback.message.answer(
+            "🗑 Шапка удалена.",
+            reply_markup=_master_menu_kb(is_admin),
+        )
+        await callback.answer()
 
     # ---- Blocked list button handler -------------------------------------------
 
@@ -1598,6 +1699,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
+        await _send_header(message, master)
         await _show_schedule(message, master.id)
 
     async def _show_schedule_day(message: Message, master_id: int, weekday: int) -> None:

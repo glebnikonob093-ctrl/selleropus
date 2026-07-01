@@ -7,7 +7,6 @@ import { BookingsPage } from "./pages/Bookings";
 import { ClientsPage } from "./pages/Clients";
 import { ServicesPage } from "./pages/Services";
 import { StatsPage } from "./pages/Stats";
-import { SettingsPage } from "./pages/Settings";
 import { PublicBookingPage } from "./pages/Public";
 import type { Me } from "./types";
 
@@ -72,7 +71,6 @@ function App() {
           <Route path="/clients" element={<ClientsPage />} />
           <Route path="/services" element={<ServicesPage />} />
           <Route path="/stats" element={<StatsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
