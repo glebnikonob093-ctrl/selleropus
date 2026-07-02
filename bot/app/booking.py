@@ -19,7 +19,12 @@ from app.models import (
     Master,
     Service,
 )
-from app.repos import find_or_create_client, list_bookings_in_window
+from app.repos import (
+    find_or_create_client,
+    get_schedule_for_weekday,
+    is_day_off,
+    list_bookings_in_window,
+)
 from app.slots import TimeRange, generate_day_slots
 
 
@@ -44,6 +49,21 @@ async def available_day_slots(
     now: datetime | None = None,
 ) -> list[datetime]:
     """Free slot start times (naive UTC) for `service` on `day`."""
+    # Check day-off
+    if await is_day_off(session, master.id, day):
+        return []
+
+    # Check per-weekday schedule (fall back to master defaults)
+    schedule = await get_schedule_for_weekday(session, master.id, day.weekday())
+    if schedule is not None:
+        if not schedule.is_working:
+            return []
+        work_start = schedule.start_minutes
+        work_end = schedule.end_minutes
+    else:
+        work_start = master.work_start_minutes
+        work_end = master.work_end_minutes
+
     day_start = datetime.combine(day, datetime.min.time())
     day_end = day_start + timedelta(days=1)
     bookings = await list_bookings_in_window(
@@ -52,8 +72,8 @@ async def available_day_slots(
     booked = [TimeRange(starts_at=b.starts_at, ends_at=b.ends_at) for b in bookings]
     return generate_day_slots(
         day=day,
-        work_start_minutes=master.work_start_minutes,
-        work_end_minutes=master.work_end_minutes,
+        work_start_minutes=work_start,
+        work_end_minutes=work_end,
         slot_step_minutes=master.slot_step_minutes,
         service_duration_minutes=service.duration_minutes,
         booked=booked,

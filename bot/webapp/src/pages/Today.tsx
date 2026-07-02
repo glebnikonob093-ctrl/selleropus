@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api";
 import { EmptyState } from "../components/EmptyState";
 import { PageHeader } from "../components/PageHeader";
@@ -39,11 +38,6 @@ export function Today() {
       <PageHeader
         title={me ? `Привет, ${me.display_name.split(" ")[0]}!` : "Сегодня"}
         subtitle={me ? `Сегодня записей: ${bookings.length}` : undefined}
-        action={
-          <Link to="/settings" className="btn btn--ghost btn--small">
-            ⚙️
-          </Link>
-        }
       />
 
       {error ? <div className="error-banner">{error}</div> : null}
@@ -53,11 +47,6 @@ export function Today() {
           icon="📭"
           title="На сегодня пусто"
           description="Поделитесь ссылкой, чтобы клиенты могли записаться сами."
-          action={
-            <Link to="/settings" className="btn btn--small">
-              Получить ссылку
-            </Link>
-          }
         />
       ) : null}
 

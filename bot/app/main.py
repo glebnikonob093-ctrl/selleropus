@@ -12,7 +12,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
 from app.api import create_api_app
-from app.bot import build_dispatcher
+from app.bot import MultiBotManager, build_dispatcher
 from app.config import Settings, load_settings
 from app.db import create_engine, create_session_factory, ensure_sqlite_dir, ping_db
 from app.migrations import create_all
@@ -60,11 +60,19 @@ async def _run(settings: Settings) -> None:
         except Exception:  # pragma: no cover - network/startup hiccup
             log.warning("get_me_failed; deep links will be unavailable")
 
+    multibot_mgr = MultiBotManager(
+        session_factory=session_factory,
+        main_notifier=notifier,
+        proxy_url=settings.telegram_proxy_url,
+    )
+    notifier.set_multibot_manager(multibot_mgr)
+
     dispatcher = build_dispatcher(
         settings=settings,
         session_factory=session_factory,
         notifier=notifier,
         bot_username=bot_username,
+        multibot_manager=multibot_mgr,
     )
 
     api_app = create_api_app(
@@ -89,6 +97,8 @@ async def _run(settings: Settings) -> None:
 
     log.info("clientika_start", api=f"{settings.api_host}:{settings.api_port}")
 
+    await multibot_mgr.start_all()
+
     api_task = asyncio.create_task(api_server.serve(), name="uvicorn")
     polling_task = asyncio.create_task(
         dispatcher.start_polling(bot, allowed_updates=dispatcher.resolve_used_update_types()),
@@ -112,6 +122,10 @@ async def _run(settings: Settings) -> None:
             except Exception:
                 log.exception("task_shutdown_error")
     finally:
+        try:
+            await multibot_mgr.shutdown()
+        except Exception:
+            pass
         try:
             scheduler.shutdown(wait=False)
         except Exception:
