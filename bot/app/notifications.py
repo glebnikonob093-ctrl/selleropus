@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError
@@ -21,6 +22,9 @@ from app.models import (
     Service,
     TeamMember,
 )
+
+if TYPE_CHECKING:
+    from app.bot.multibot import MultiBotManager
 
 log = logging.getLogger(__name__)
 
@@ -54,19 +58,37 @@ def _client_label_html(client: Client) -> str:
 class Notifier:
     def __init__(self, bot: Bot) -> None:
         self.bot = bot
+        self._multibot_manager: MultiBotManager | None = None
 
-    async def _safe_send(self, chat_id: int, text: str) -> bool:
+    def set_multibot_manager(self, manager: MultiBotManager) -> None:
+        self._multibot_manager = manager
+
+    def _get_client_bot(self, master_id: int) -> Bot:
+        """Return the master's personal bot if running, else the main bot."""
+        if self._multibot_manager is not None:
+            master_bot = self._multibot_manager.get_bot(master_id)
+            if master_bot is not None:
+                return master_bot
+        return self.bot
+
+    async def _safe_send(
+        self, chat_id: int, text: str, *, bot: Bot | None = None,
+    ) -> bool:
         """Send a message, swallowing Telegram errors. Returns True iff delivered."""
+        send_bot = bot or self.bot
         try:
-            await self.bot.send_message(chat_id, text, disable_web_page_preview=True)
+            await send_bot.send_message(chat_id, text, disable_web_page_preview=True)
             return True
         except TelegramAPIError as exc:
             log.warning("notifier_send_failed chat_id=%s error=%s", chat_id, exc)
             return False
 
-    async def _safe_send_html(self, chat_id: int, text: str) -> bool:
+    async def _safe_send_html(
+        self, chat_id: int, text: str, *, bot: Bot | None = None,
+    ) -> bool:
+        send_bot = bot or self.bot
         try:
-            await self.bot.send_message(
+            await send_bot.send_message(
                 chat_id, text, parse_mode="HTML", disable_web_page_preview=True
             )
             return True
@@ -110,7 +132,9 @@ class Notifier:
             f"Услуга: {service.name}\n"
             f"Когда: {_format_local(booking.starts_at)}"
         )
-        await self._safe_send(client.tg_user_id, text)
+        await self._safe_send(
+            client.tg_user_id, text, bot=self._get_client_bot(master.id),
+        )
 
     async def notify_client_booking_cancelled(
         self,
@@ -127,7 +151,9 @@ class Notifier:
             f"Услуга: {service.name}\n"
             f"Когда было: {_format_local(booking.starts_at)}"
         )
-        await self._safe_send(client.tg_user_id, text)
+        await self._safe_send(
+            client.tg_user_id, text, bot=self._get_client_bot(master.id),
+        )
 
     async def notify_status_change(
         self,
@@ -172,7 +198,9 @@ class Notifier:
         else:
             head = f"⏰ Напоминание: через {hours_until} ч запись"
         text = f"{head} к {master.display_name}\nУслуга: {service.name}\nКогда: {when}"
-        return await self._safe_send(client.tg_user_id, text)
+        return await self._safe_send(
+            client.tg_user_id, text, bot=self._get_client_bot(master.id),
+        )
 
     async def notify_master_morning_summary(
         self,

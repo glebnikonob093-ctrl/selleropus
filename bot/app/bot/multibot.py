@@ -119,3 +119,8 @@ class MultiBotManager:
 
     def is_running(self, master_id: int) -> bool:
         return master_id in self._running
+
+    def get_bot(self, master_id: int) -> Bot | None:
+        """Return the running Bot instance for a master, or None."""
+        entry = self._running.get(master_id)
+        return entry.bot if entry is not None else None

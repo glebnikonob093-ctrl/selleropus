@@ -65,6 +65,7 @@ async def _run(settings: Settings) -> None:
         main_notifier=notifier,
         proxy_url=settings.telegram_proxy_url,
     )
+    notifier.set_multibot_manager(multibot_mgr)
 
     dispatcher = build_dispatcher(
         settings=settings,
