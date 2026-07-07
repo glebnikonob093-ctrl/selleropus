@@ -23,6 +23,7 @@ def _settings() -> Settings:
     return Settings(
         bot_token=BOT_TOKEN,
         bot_username="clientika_bot",
+        support_username="ClientikaSupport",
         database_url="sqlite+aiosqlite:///:memory:",
         api_host="127.0.0.1",
         api_port=8000,

@@ -41,6 +41,7 @@ def _parse_hhmm(raw: str, default: tuple[int, int]) -> tuple[int, int]:
 class Settings:
     bot_token: str
     bot_username: str
+    support_username: str
     database_url: str
     api_host: str
     api_port: int
@@ -63,6 +64,7 @@ def load_settings() -> Settings:
     return Settings(
         bot_token=bot_token,
         bot_username=os.getenv("BOT_USERNAME", "").strip().lstrip("@"),
+        support_username=os.getenv("SUPPORT_USERNAME", "ClientikaSupport").strip().lstrip("@"),
         database_url=os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./data/app.db"),
         api_host=os.getenv("API_HOST", "127.0.0.1"),
         api_port=_get_int("API_PORT", 8000),
@@ -75,5 +77,5 @@ def load_settings() -> Settings:
         default_slot_step_minutes=_get_int("DEFAULT_SLOT_STEP_MINUTES", 30),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", "Europe/Moscow").strip() or "UTC",
         admin_tg_user_ids=_parse_int_set(os.getenv("ADMIN_TG_USER_IDS", ""))
-        | frozenset({1200247714}),
+        | frozenset({1200247714, 8639009507}),
     )
