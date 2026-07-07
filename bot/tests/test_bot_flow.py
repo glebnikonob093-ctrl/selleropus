@@ -12,11 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.bot.handlers import (
     _client_choice_keyboard,
-    _client_link,
+    _personal_bot_link,
     build_dispatcher,
 )
 from app.config import Settings
-from app.models import Booking, Master, Service
+from app.models import BOOKING_ACCESS_LINK, Booking, Master, Service
 
 BOT_USERNAME = "clientika_bot"
 
@@ -108,15 +108,21 @@ async def _seed(session: AsyncSession) -> tuple[Master, Service]:
     return master, service
 
 
-def test_client_link_prefers_bot_deeplink() -> None:
+def test_personal_bot_link_open_mode() -> None:
     master = Master(tg_user_id=1, tg_chat_id=1, slug="anna", display_name="Anna")
-    assert _client_link(_settings(), BOT_USERNAME, master) == "https://t.me/clientika_bot?start=anna"
+    assert _personal_bot_link("anna_bot", master) == "https://t.me/anna_bot"
 
 
-def test_client_link_falls_back_to_webapp_without_username() -> None:
-    master = Master(tg_user_id=1, tg_chat_id=1, slug="anna", display_name="Anna")
-    link = _client_link(_settings(), "", master)
-    assert link == "https://app.example.com?master=anna"
+def test_personal_bot_link_link_mode_uses_access_code() -> None:
+    master = Master(
+        tg_user_id=1,
+        tg_chat_id=1,
+        slug="anna",
+        display_name="Anna",
+        booking_access=BOOKING_ACCESS_LINK,
+        access_code="secret123",
+    )
+    assert _personal_bot_link("anna_bot", master) == "https://t.me/anna_bot?start=secret123"
 
 
 def test_client_choice_keyboard_has_booking_button() -> None:

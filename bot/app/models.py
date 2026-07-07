@@ -41,6 +41,10 @@ ACTIVE_BOOKING_STATUSES = (
     BOOKING_STATUS_CAME,
 )
 
+# ---- Client booking access modes (per master) ----
+BOOKING_ACCESS_OPEN = "open"    # anyone who opens the master's bot can book
+BOOKING_ACCESS_LINK = "link"    # only clients who came via the master's link
+
 
 class Master(Base):
     """A self-employed user (the bot's customer). Owns services, clients and bookings."""
@@ -62,6 +66,13 @@ class Master(Base):
     work_end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)  # 20:00
     slot_step_minutes: Mapped[int] = mapped_column(Integer, default=30)
     book_days_ahead: Mapped[int] = mapped_column(Integer, default=30)
+
+    # How clients gain access to this master's personal bot:
+    # "open" — anyone; "link" — only via the master's special access link.
+    booking_access: Mapped[str] = mapped_column(
+        String(16), default=BOOKING_ACCESS_OPEN
+    )
+    access_code: Mapped[str] = mapped_column(String(32), default="")
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -105,6 +116,9 @@ class Client(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_visit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # Whether this client is allowed to book when the master uses "link" access.
+    access_granted: Mapped[bool] = mapped_column(Boolean, default=False)
 
     master: Mapped[Master] = relationship(back_populates="clients")
     bookings: Mapped[list[Booking]] = relationship(back_populates="client")

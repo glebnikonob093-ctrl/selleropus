@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Dispatcher, F, Router
-from aiogram.filters import CommandStart
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -39,6 +39,7 @@ from app.booking import (
 )
 from app.db import session_scope
 from app.models import (
+    BOOKING_ACCESS_LINK,
     BOOKING_STATUS_CANCELLED,
     Booking,
     Client,
@@ -47,8 +48,10 @@ from app.models import (
 )
 from app.notifications import Notifier
 from app.repos import (
+    client_has_access,
     find_or_create_client,
     get_master_schedule,
+    grant_client_access,
     is_client_blocked,
     list_active_services,
     list_day_offs,
@@ -252,6 +255,16 @@ def build_client_dispatcher(
         )
         return res.scalar_one_or_none()
 
+    async def _can_interact(tg_user_id: int) -> bool:
+        """True if the user may use the bot given the master's access mode."""
+        async with session_scope(session_factory) as session:
+            master = await _get_master(session)
+            if master is None:
+                return False
+            if master.booking_access != BOOKING_ACCESS_LINK:
+                return True
+            return await client_has_access(session, master_id, tg_user_id)
+
     async def _start_booking(message: Message, state: FSMContext) -> None:
         async with session_scope(session_factory) as session:
             services = await list_active_services(session, master_id)
@@ -270,10 +283,13 @@ def build_client_dispatcher(
     # ---- /start ----
 
     @router.message(CommandStart())
-    async def on_start(message: Message, state: FSMContext) -> None:
+    async def on_start(
+        message: Message, command: CommandObject, state: FSMContext
+    ) -> None:
         await state.clear()
         from_user = message.from_user
         assert from_user is not None
+        payload = (command.args or "").strip()
 
         async with session_scope(session_factory) as session:
             master = await _get_master(session)
@@ -281,6 +297,8 @@ def build_client_dispatcher(
                 await message.answer("Бот временно недоступен.")
                 return
             display_name = master.display_name
+            access_mode = master.booking_access
+            access_code = master.access_code
             blocked = await is_client_blocked(session, master_id, from_user.id)
             client = await _get_client(session, from_user.id)
 
@@ -289,6 +307,36 @@ def build_client_dispatcher(
                 "К сожалению, вы заблокированы этим мастером и не можете записаться."
             )
             return
+
+        # Access control: in "link" mode only clients who arrive via the
+        # master's special link (or who were already granted access) may book.
+        if access_mode == BOOKING_ACCESS_LINK:
+            valid_link = bool(access_code) and payload == access_code
+            if valid_link:
+                tg_name = (
+                    f"{from_user.first_name or ''} {from_user.last_name or ''}".strip()
+                    or "Клиент"
+                )
+                async with session_scope(session_factory) as session:
+                    await grant_client_access(
+                        session,
+                        master_id,
+                        tg_user_id=from_user.id,
+                        name=tg_name,
+                        tg_username=from_user.username or None,
+                    )
+            else:
+                async with session_scope(session_factory) as session:
+                    allowed = await client_has_access(
+                        session, master_id, from_user.id
+                    )
+                if not allowed:
+                    await message.answer(
+                        f"Запись к мастеру <b>{display_name}</b> — только по личной "
+                        "ссылке. Попросите её у мастера и откройте бота по ней.",
+                        parse_mode="HTML",
+                    )
+                    return
 
         if client is not None and client.phone:
             await state.update_data(
@@ -560,6 +608,12 @@ def build_client_dispatcher(
                 reply_markup=_main_menu_kb(),
             )
             return None
+        if not await _can_interact(tg_user_id):
+            await message.answer(
+                "Запись к этому мастеру — только по личной ссылке. "
+                "Попросите её у мастера."
+            )
+            return None
         data = await state.get_data()
         if data.get("phone"):
             return data
@@ -817,6 +871,13 @@ def build_client_dispatcher(
     async def on_fallback(message: Message, state: FSMContext) -> None:
         current_state = await state.get_state()
         if current_state is not None:
+            return
+        from_user = message.from_user
+        if from_user is not None and not await _can_interact(from_user.id):
+            await message.answer(
+                "Запись к этому мастеру — только по личной ссылке. "
+                "Попросите её у мастера."
+            )
             return
         await message.answer(
             "Выберите действие в меню ниже.",
