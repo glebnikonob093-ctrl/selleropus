@@ -458,7 +458,7 @@ async def add_team_member(
     tg_user_id: int,
     tg_username: str | None = None,
     display_name: str = "",
-) -> TeamMember:
+) -> tuple[TeamMember, bool]:
     res = await session.execute(
         select(TeamMember).where(
             TeamMember.master_id == master_id,
@@ -469,7 +469,7 @@ async def add_team_member(
     if existing is not None:
         existing.tg_username = tg_username
         existing.display_name = display_name or existing.display_name
-        return existing
+        return existing, False
     tm = TeamMember(
         master_id=master_id,
         tg_user_id=tg_user_id,
@@ -478,7 +478,7 @@ async def add_team_member(
     )
     session.add(tm)
     await session.flush()
-    return tm
+    return tm, True
 
 
 async def remove_team_member(
@@ -494,6 +494,7 @@ async def remove_team_member(
     if tm is None:
         return False
     await session.delete(tm)
+    await session.flush()
     return True
 
 

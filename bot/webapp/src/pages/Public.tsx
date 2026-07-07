@@ -163,6 +163,14 @@ export function PublicBookingPage({ slug }: { slug: string }) {
                   <div className="list-item__row">
                     <div>
                       <div className="list-item__title">{s.name}</div>
+                      {s.description ? (
+                        <div
+                          className="list-item__meta"
+                          style={{ marginTop: 4, whiteSpace: "pre-wrap" }}
+                        >
+                          {s.description}
+                        </div>
+                      ) : null}
                       <div className="list-item__meta">
                         {formatDuration(s.duration_minutes)} · {formatPrice(s.price)}
                       </div>

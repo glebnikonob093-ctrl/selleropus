@@ -61,6 +61,7 @@ export const api = {
     ),
   createService: (payload: {
     name: string;
+    description?: string | null;
     price: number;
     duration_minutes: number;
     is_active?: boolean;
