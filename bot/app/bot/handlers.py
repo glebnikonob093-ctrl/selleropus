@@ -98,6 +98,7 @@ _M_BTN_ADMIN = "👑 Админ-панель"
 
 # Sub-menu buttons
 _M_BTN_TODAY = "📅 Сегодня"
+_M_BTN_ALL_BOOKINGS = "📋 Все записи"
 _M_BTN_SCHEDULE = "⏰ Расписание"
 _M_BTN_CLIENTS = "📋 Список клиентов"
 _M_BTN_BLOCKED = "🚫 Заблокированные"
@@ -173,7 +174,7 @@ def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
 def _bookings_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_SCHEDULE)],
+            [KeyboardButton(text=_M_BTN_ALL_BOOKINGS), KeyboardButton(text=_M_BTN_SCHEDULE)],
             [KeyboardButton(text=_M_BTN_BACK)],
         ],
         resize_keyboard=True,
@@ -693,11 +694,11 @@ def build_dispatcher(
         )
 
     async def _show_link(
-        message: Message, master: Master, *, back_kb: bool = False
+        message: Message, master: Master, *, kb: ReplyKeyboardMarkup | None = None
     ) -> None:
         link = _client_link(settings, bot_username, master)
         is_admin = _is_admin(master.tg_user_id)
-        kb = _back_kb() if back_kb else _master_menu_kb(is_admin)
+        kb = kb or _master_menu_kb(is_admin)
         await message.answer(
             f"Ваша персональная ссылка для клиентов:\n<code>{link}</code>",
             parse_mode="HTML",
@@ -739,6 +740,79 @@ def build_dispatcher(
             )
         await message.answer(
             "\n".join(lines), parse_mode="HTML", reply_markup=kb
+        )
+
+    async def _show_bookings(
+        message: Message, master: Master, *, kb: ReplyKeyboardMarkup | None = None
+    ) -> None:
+        """Show all bookings for the master: today + upcoming + recent past."""
+        reply_kb = kb or _bookings_menu_kb()
+
+        def _fmt(booking: Booking, client: Client, service: Service,
+                 *, with_date: bool, with_status: bool = False) -> str:
+            when = (
+                booking.starts_at.strftime("%d.%m %H:%M")
+                if with_date
+                else booking.starts_at.strftime("%H:%M")
+            )
+            line = (
+                f"• {when} — {service.name} — {client.name}"
+                + (f" ({client.phone})" if client.phone else "")
+            )
+            if with_status:
+                line += f" — {_STATUS_LABELS_RU.get(booking.status, booking.status)}"
+            return line
+
+        async with session_scope(session_factory) as session:
+            now = datetime.utcnow()
+            day_start = datetime(now.year, now.month, now.day)
+            day_end = day_start + timedelta(days=1)
+            base = (
+                select(Booking, Client, Service)
+                .join(Client, Client.id == Booking.client_id)
+                .join(Service, Service.id == Booking.service_id)
+                .where(Booking.master_id == master.id)
+            )
+            today_rows = list((await session.execute(
+                base.where(Booking.starts_at >= day_start)
+                .where(Booking.starts_at < day_end)
+                .where(Booking.status.in_(ACTIVE_BOOKING_STATUSES))
+                .order_by(Booking.starts_at)
+            )).all())
+            upcoming_rows = list((await session.execute(
+                base.where(Booking.starts_at >= day_end)
+                .where(Booking.status.in_(ACTIVE_BOOKING_STATUSES))
+                .order_by(Booking.starts_at)
+            )).all())
+            past_rows = list((await session.execute(
+                base.where(Booking.starts_at < day_start)
+                .order_by(Booking.starts_at.desc())
+                .limit(20)
+            )).all())
+
+        if not today_rows and not upcoming_rows and not past_rows:
+            await message.answer("У вас пока нет записей.", reply_markup=reply_kb)
+            return
+
+        blocks: list[str] = []
+        if today_rows:
+            lines = [f"<b>📅 Сегодня ({len(today_rows)})</b>"]
+            lines += [_fmt(b, c, s, with_date=False) for b, c, s in today_rows]
+            blocks.append("\n".join(lines))
+        if upcoming_rows:
+            lines = [f"<b>⏭ Предстоящие ({len(upcoming_rows)})</b>"]
+            lines += [_fmt(b, c, s, with_date=True) for b, c, s in upcoming_rows]
+            blocks.append("\n".join(lines))
+        if past_rows:
+            lines = [f"<b>🕓 Прошедшие (последние {len(past_rows)})</b>"]
+            lines += [
+                _fmt(b, c, s, with_date=True, with_status=True)
+                for b, c, s in reversed(past_rows)
+            ]
+            blocks.append("\n".join(lines))
+
+        await message.answer(
+            "\n\n".join(blocks), parse_mode="HTML", reply_markup=reply_kb
         )
 
     @router.message(Command("link"))
@@ -1017,11 +1091,17 @@ def build_dispatcher(
         if master is None or not master.is_master:
             return
         await state.clear()
-        await message.answer(
-            "📅 <b>Записи</b> — выберите:",
-            parse_mode="HTML",
-            reply_markup=_bookings_menu_kb(),
-        )
+        await _show_bookings(message, master)
+
+    @router.message(F.text == _M_BTN_ALL_BOOKINGS)
+    async def on_btn_all_bookings(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await state.clear()
+        await _show_bookings(message, master)
 
     @router.message(F.text == _M_BTN_CAT_CLIENTS)
     async def on_btn_cat_clients(message: Message, state: FSMContext) -> None:
@@ -1058,7 +1138,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-        await _show_today(message, master, back_kb=True)
+        await _show_bookings(message, master)
 
     _CLIENTS_PAGE_SIZE = 5
 
@@ -1358,7 +1438,7 @@ def build_dispatcher(
             f"• Неделя: {week_rev} ₽\n"
             f"• Месяц: {month_rev} ₽",
             parse_mode="HTML",
-            reply_markup=_back_kb(),
+            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
         )
 
     @router.message(F.text == _M_BTN_LINK)
@@ -1368,7 +1448,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-        await _show_link(message, master, back_kb=True)
+        await _show_link(message, master, kb=_bot_menu_kb())
 
     @router.message(F.text == _M_BTN_BOT)
     async def on_btn_bot(message: Message) -> None:
@@ -1562,10 +1642,12 @@ def build_dispatcher(
 
     @router.message(F.text == _M_BTN_HELP)
     async def on_btn_help(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
         await message.answer(
             _HELP_TEXT,
             parse_mode="HTML",
-            reply_markup=_back_kb(),
+            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
             disable_web_page_preview=True,
         )
 
@@ -1585,7 +1667,7 @@ def build_dispatcher(
         if not blocked:
             await message.answer(
                 "Нет заблокированных клиентов.",
-                reply_markup=_back_kb(),
+                reply_markup=_clients_menu_kb(),
             )
             return
 
