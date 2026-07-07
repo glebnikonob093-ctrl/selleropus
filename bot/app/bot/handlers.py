@@ -88,17 +88,37 @@ log = logging.getLogger(__name__)
 _WEEKDAYS_RU = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
 _BOOK_DAYS_AHEAD = 14
 
-# Master persistent menu button labels
-_M_BTN_TODAY = "📅 Сегодня"
-_M_BTN_CLIENTS = "👥 Клиенты"
+# Top-level category buttons
+_M_BTN_CAT_BOOKINGS = "📅 Записи"
+_M_BTN_CAT_CLIENTS = "👥 Клиенты"
+_M_BTN_CAT_BOT = "🤖 Бот и ссылка"
 _M_BTN_STATS = "📊 Статистика"
-_M_BTN_LINK = "🔗 Ссылка"
-_M_BTN_BOT = "🤖 Мой бот"
-_M_BTN_BLOCKED = "🚫 Заблокированные"
-_M_BTN_TEAM = "👥 Команда"
-_M_BTN_SCHEDULE = "⏰ Расписание"
 _M_BTN_HELP = "❓ Помощь"
 _M_BTN_ADMIN = "👑 Админ-панель"
+
+# Sub-menu buttons
+_M_BTN_TODAY = "📅 Сегодня"
+_M_BTN_SCHEDULE = "⏰ Расписание"
+_M_BTN_CLIENTS = "📋 Список клиентов"
+_M_BTN_BLOCKED = "🚫 Заблокированные"
+_M_BTN_LINK = "🔗 Ссылка для клиентов"
+_M_BTN_BOT = "🤖 Мой бот"
+_M_BTN_BOT_CONNECT = "➕ Подключить бота"
+_M_BTN_BOT_REMOVE = "❌ Отключить бота"
+_M_BTN_TEAM = "👥 Команда"
+
+_HELP_TEXT = (
+    "❓ <b>Как пользоваться Clientika</b>\n\n"
+    "Всё делается кнопками внизу экрана:\n\n"
+    "📅 <b>Записи</b> — записи на сегодня и настройка расписания.\n"
+    "👥 <b>Клиенты</b> — список клиентов, история и блокировка.\n"
+    "🤖 <b>Бот и ссылка</b> — ваша ссылка для клиентов, подключение "
+    "и отключение вашего бота, ваша команда.\n"
+    "📊 <b>Статистика</b> — доход и количество записей.\n\n"
+    "Чтобы начать принимать записи: откройте «🤖 Бот и ссылка» → "
+    "«➕ Подключить бота» и следуйте подсказкам.\n\n"
+    "Вернуться в начало — /start."
+)
 
 
 class BookingFlow(StatesGroup):
@@ -124,6 +144,11 @@ class TeamFlow(StatesGroup):
     tg_id = State()
 
 
+class BotConnectFlow(StatesGroup):
+    """States for connecting a client bot via a menu button."""
+
+    token = State()
+
 
 class BroadcastFlow(StatesGroup):
     """States for admin broadcast."""
@@ -136,15 +161,45 @@ _M_BTN_BACK = "◀️ Назад"
 
 def _master_menu_kb(is_admin: bool = False) -> ReplyKeyboardMarkup:
     rows = [
-        [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_CLIENTS)],
-        [KeyboardButton(text=_M_BTN_STATS), KeyboardButton(text=_M_BTN_LINK)],
-        [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_BLOCKED)],
-        [KeyboardButton(text=_M_BTN_TEAM), KeyboardButton(text=_M_BTN_SCHEDULE)],
+        [KeyboardButton(text=_M_BTN_CAT_BOOKINGS), KeyboardButton(text=_M_BTN_CAT_CLIENTS)],
+        [KeyboardButton(text=_M_BTN_CAT_BOT), KeyboardButton(text=_M_BTN_STATS)],
         [KeyboardButton(text=_M_BTN_HELP)],
     ]
     if is_admin:
         rows.append([KeyboardButton(text=_M_BTN_ADMIN)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def _bookings_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=_M_BTN_TODAY), KeyboardButton(text=_M_BTN_SCHEDULE)],
+            [KeyboardButton(text=_M_BTN_BACK)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _clients_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=_M_BTN_CLIENTS), KeyboardButton(text=_M_BTN_BLOCKED)],
+            [KeyboardButton(text=_M_BTN_BACK)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def _bot_menu_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=_M_BTN_LINK)],
+            [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_TEAM)],
+            [KeyboardButton(text=_M_BTN_BOT_CONNECT), KeyboardButton(text=_M_BTN_BOT_REMOVE)],
+            [KeyboardButton(text=_M_BTN_BACK)],
+        ],
+        resize_keyboard=True,
+    )
 
 
 def _back_kb() -> ReplyKeyboardMarkup:
@@ -623,7 +678,8 @@ def build_dispatcher(
             f"Ваша ссылка для записи клиентов: <code>{link}</code>\n"
             + bot_line
             + (
-                "\nПодключите своего бота для записи клиентов: /addbot"
+                "\nЧтобы принимать записи — нажмите «🤖 Бот и ссылка» → "
+                "«➕ Подключить бота»."
                 if not bot_line
                 else ""
             )
@@ -717,18 +773,10 @@ def build_dispatcher(
         assert from_user is not None
         is_admin = _is_admin(from_user.id)
         await message.answer(
-            "Команды бота:\n"
-            "/start — приветствие и меню\n"
-            "/link — ваша ссылка для клиентов\n"
-            "/today — записи на сегодня\n"
-            "/addbot <токен> — подключить бот для записи клиентов\n"
-            "/removebot — отключить бот для записи\n"
-            "/mybot — информация о подключённом боте\n"
-            "/block <tg_id> — заблокировать клиента\n"
-            "/unblock <tg_id> — разблокировать клиента\n"
-            "/blocked — список заблокированных"
-            + ("\n\n👑 Админ-панель доступна через меню" if is_admin else ""),
+            _HELP_TEXT,
+            parse_mode="HTML",
             reply_markup=_master_menu_kb(is_admin),
+            disable_web_page_preview=True,
         )
 
     # ---- Master bot management -----------------------------------------------
@@ -957,6 +1005,50 @@ def build_dispatcher(
         await message.answer(
             "Главное меню:",
             reply_markup=_master_menu_kb(is_admin),
+        )
+
+    # ---- Category submenus -----------------------------------------------------
+
+    @router.message(F.text == _M_BTN_CAT_BOOKINGS)
+    async def on_btn_cat_bookings(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await state.clear()
+        await message.answer(
+            "📅 <b>Записи</b> — выберите:",
+            parse_mode="HTML",
+            reply_markup=_bookings_menu_kb(),
+        )
+
+    @router.message(F.text == _M_BTN_CAT_CLIENTS)
+    async def on_btn_cat_clients(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await state.clear()
+        await message.answer(
+            "👥 <b>Клиенты</b> — выберите:",
+            parse_mode="HTML",
+            reply_markup=_clients_menu_kb(),
+        )
+
+    @router.message(F.text == _M_BTN_CAT_BOT)
+    async def on_btn_cat_bot(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await state.clear()
+        await message.answer(
+            "🤖 <b>Бот и ссылка</b> — выберите:",
+            parse_mode="HTML",
+            reply_markup=_bot_menu_kb(),
         )
 
     @router.message(F.text == _M_BTN_TODAY)
@@ -1291,11 +1383,9 @@ def build_dispatcher(
 
         if mb is None:
             await message.answer(
-                "У вас нет подключённого бота.\n"
-                "Создайте бота в @BotFather и подключите:\n"
-                "<code>/addbot ТОКЕН</code>",
-                parse_mode="HTML",
-                reply_markup=_back_kb(),
+                "У вас пока нет подключённого бота.\n"
+                "Нажмите «➕ Подключить бота» — я подскажу, что делать.",
+                reply_markup=_bot_menu_kb(),
             )
             return
 
@@ -1306,23 +1396,177 @@ def build_dispatcher(
             f"Статус: {status}\n"
             f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
             disable_web_page_preview=True,
+            reply_markup=_bot_menu_kb(),
+        )
+
+    # ---- Connect / disconnect client bot via buttons --------------------------
+
+    @router.message(F.text == _M_BTN_BOT_CONNECT)
+    async def on_btn_bot_connect(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+        await state.set_state(BotConnectFlow.token)
+        await message.answer(
+            "Пришлите <b>токен</b> вашего бота одним сообщением 👇\n\n"
+            "Где его взять:\n"
+            "1️⃣ Откройте @BotFather\n"
+            "2️⃣ Отправьте «/newbot» и придумайте имя\n"
+            "3️⃣ Скопируйте токен вида <code>12345678:AbCdEf...</code> "
+            "и пришлите сюда\n\n"
+            "Чтобы отменить — нажмите «◀️ Назад».",
+            parse_mode="HTML",
             reply_markup=_back_kb(),
         )
+
+    @router.message(BotConnectFlow.token, F.text)
+    async def on_bot_connect_token(message: Message, state: FSMContext) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await state.clear()
+            return
+
+        token = (message.text or "").strip()
+        if ":" not in token or len(token) < 20:
+            await message.answer(
+                "Это не похоже на токен. Он выглядит так: "
+                "<code>12345678:AbCdEf...</code>\n"
+                "Скопируйте его из @BotFather и пришлите ещё раз "
+                "или нажмите «◀️ Назад».",
+                parse_mode="HTML",
+                reply_markup=_back_kb(),
+            )
+            return
+
+        try:
+            temp_bot = Bot(token=token)
+            me = await temp_bot.get_me()
+            await temp_bot.session.close()
+        except Exception:
+            await message.answer(
+                "Не получилось подключиться с этим токеном 😕\n"
+                "Проверьте, что скопировали его полностью, и пришлите ещё раз "
+                "(или «◀️ Назад»).",
+                reply_markup=_back_kb(),
+            )
+            return
+
+        assert me.id is not None
+        assert me.username is not None
+
+        async with session_scope(session_factory) as session:
+            existing = await get_master_bot_by_bot_id(session, me.id)
+            if existing is not None and existing.master_id != master.id:
+                await state.clear()
+                await message.answer(
+                    "Этот бот уже подключён к другому мастеру.",
+                    reply_markup=_bot_menu_kb(),
+                )
+                return
+
+            old = await get_master_bot(session, master.id)
+            if old is not None:
+                if multibot_manager is not None:
+                    await multibot_manager.remove_bot(master.id)
+                await delete_master_bot(session, master.id)
+
+            await create_master_bot(
+                session,
+                master_id=master.id,
+                bot_token=token,
+                bot_username=me.username or "",
+                bot_id=me.id,
+            )
+
+        if multibot_manager is not None:
+            await multibot_manager.add_bot(master.id, token)
+
+        await state.clear()
+        await message.answer(
+            f"✅ Бот @{me.username} подключён!\n\n"
+            f"Отправьте клиентам ссылку: https://t.me/{me.username}\n"
+            "Уведомления о новых записях будут приходить сюда.",
+            reply_markup=_bot_menu_kb(),
+            disable_web_page_preview=True,
+        )
+
+    @router.message(F.text == _M_BTN_BOT_REMOVE)
+    async def on_btn_bot_remove(message: Message) -> None:
+        from_user = message.from_user
+        assert from_user is not None
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            return
+
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+
+        if mb is None:
+            await message.answer(
+                "У вас нет подключённого бота.",
+                reply_markup=_bot_menu_kb(),
+            )
+            return
+
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="❌ Да, отключить", callback_data="botrm:yes"
+                )],
+                [InlineKeyboardButton(
+                    text="↩️ Оставить", callback_data="botrm:no"
+                )],
+            ]
+        )
+        await message.answer(
+            f"Отключить бота @{mb.bot_username}?\n"
+            "Клиенты больше не смогут записываться через него.",
+            reply_markup=kb,
+        )
+
+    @router.callback_query(F.data == "botrm:no")
+    async def on_bot_remove_no(callback: CallbackQuery) -> None:
+        assert isinstance(callback.message, Message)
+        await callback.message.edit_text("Бот оставлен подключённым.")
+        await callback.answer()
+
+    @router.callback_query(F.data == "botrm:yes")
+    async def on_bot_remove_yes(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        master = await _get_existing_master(from_user.id)
+        if master is None or not master.is_master:
+            await callback.answer("Нет доступа", show_alert=True)
+            return
+        assert isinstance(callback.message, Message)
+
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+            if mb is None:
+                await callback.message.edit_text("Бот уже отключён.")
+                await callback.answer()
+                return
+            bot_username = mb.bot_username
+            if multibot_manager is not None:
+                await multibot_manager.remove_bot(master.id)
+            await delete_master_bot(session, master.id)
+
+        await callback.message.edit_text(
+            f"Бот @{bot_username} отключён. Клиенты больше не смогут "
+            "записываться через него."
+        )
+        await callback.answer("Отключён")
 
     @router.message(F.text == _M_BTN_HELP)
     async def on_btn_help(message: Message) -> None:
         await message.answer(
-            "Команды бота:\n"
-            "/start — приветствие и меню\n"
-            "/link — ваша ссылка для клиентов\n"
-            "/today — записи на сегодня\n"
-            "/addbot <токен> — подключить бот для записи\n"
-            "/removebot — отключить бот для записи\n"
-            "/mybot — информация о боте\n"
-            "/block <tg_id> — заблокировать клиента\n"
-            "/unblock <tg_id> — разблокировать клиента\n"
-            "/blocked — список заблокированных",
+            _HELP_TEXT,
+            parse_mode="HTML",
             reply_markup=_back_kb(),
+            disable_web_page_preview=True,
         )
 
     # ---- Blocked list button handler -------------------------------------------
@@ -1384,8 +1628,8 @@ def build_dispatcher(
                 lines.append(f"• {tm.display_name or 'Участник'}{tg_link} · <code>{tm.tg_user_id}</code>")
 
         lines.append(
-            "\nДобавить: <code>/addteam TG_ID Имя</code>\n"
-            "Удалить: <code>/removeteam TG_ID</code>"
+            "\nДобавьте участника кнопкой ниже — он будет получать "
+            "уведомления о новых записях."
         )
 
         kb = InlineKeyboardMarkup(
