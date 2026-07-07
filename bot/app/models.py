@@ -41,6 +41,14 @@ ACTIVE_BOOKING_STATUSES = (
     BOOKING_STATUS_CAME,
 )
 
+BOOKING_STATUS_LABELS_RU = {
+    BOOKING_STATUS_NEW: "Новая",
+    BOOKING_STATUS_CONFIRMED: "Подтверждена",
+    BOOKING_STATUS_CAME: "Пришёл",
+    BOOKING_STATUS_CANCELLED: "Отмена",
+    BOOKING_STATUS_NO_SHOW: "Не пришёл",
+}
+
 # ---- Client booking access modes (per master) ----
 BOOKING_ACCESS_OPEN = "open"    # anyone who opens the master's bot can book
 BOOKING_ACCESS_LINK = "link"    # only clients who came via the master's link

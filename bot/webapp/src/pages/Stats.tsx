@@ -12,22 +12,41 @@ export function StatsPage() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [returnClients, setReturnClients] = useState<ReturnClient[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [returnClientsLoading, setReturnClientsLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
+    setError(null);
+    setStats(null);
+    setReturnClients([]);
+    setStatsLoading(true);
+    setReturnClientsLoading(true);
+
     (async () => {
       try {
-        const [s, rc] = await Promise.all([
-          api.getStats(period),
-          api.getReturnClients(30),
-        ]);
+        const s = await api.getStats(period);
         if (cancelled) return;
         setStats(s);
+      } catch (err) {
+        if (!cancelled) setError(String(err));
+      } finally {
+        if (!cancelled) setStatsLoading(false);
+      }
+    })();
+
+    (async () => {
+      try {
+        const rc = await api.getReturnClients(30);
+        if (cancelled) return;
         setReturnClients(rc);
       } catch (err) {
         if (!cancelled) setError(String(err));
+      } finally {
+        if (!cancelled) setReturnClientsLoading(false);
       }
     })();
+
     return () => {
       cancelled = true;
     };
@@ -52,27 +71,38 @@ export function StatsPage() {
         ))}
       </div>
 
-      <div className="kpi-grid">
-        <div className="kpi">
-          <div className="kpi__label">Доход</div>
-          <div className="kpi__value">{formatPrice(stats?.revenue ?? 0)}</div>
+      {statsLoading || returnClientsLoading ? (
+        <div style={{ textAlign: "center", padding: 24, color: "var(--hint)" }}>
+          Загрузка...
         </div>
-        <div className="kpi">
-          <div className="kpi__label">Записей</div>
-          <div className="kpi__value">{stats?.bookings_total ?? 0}</div>
+      ) : null}
+
+      {!statsLoading ? (
+        <div className="kpi-grid">
+          <div className="kpi">
+            <div className="kpi__label">Доход</div>
+            <div className="kpi__value">{formatPrice(stats?.revenue ?? 0)}</div>
+          </div>
+          <div className="kpi">
+            <div className="kpi__label">Записей</div>
+            <div className="kpi__value">{stats?.bookings_total ?? 0}</div>
+          </div>
+          <div className="kpi">
+            <div className="kpi__label">Из них «пришёл»</div>
+            <div className="kpi__value">{stats?.bookings_came ?? 0}</div>
+          </div>
         </div>
-        <div className="kpi">
-          <div className="kpi__label">Из них «пришёл»</div>
-          <div className="kpi__value">{stats?.bookings_came ?? 0}</div>
-        </div>
-        <div className="kpi">
+      ) : null}
+
+      {!returnClientsLoading ? (
+        <div className="kpi" style={{ marginTop: 12 }}>
           <div className="kpi__label">Вернуть клиентов</div>
           <div className="kpi__value">{returnClients.length}</div>
         </div>
-      </div>
+      ) : null}
 
       <h3 style={{ margin: "16px 0 8px" }}>Топ услуг</h3>
-      {stats && stats.top_services.length > 0 ? (
+      {statsLoading ? null : stats && stats.top_services.length > 0 ? (
         <div className="list">
           {stats.top_services.map((t) => (
             <div className="list-item" key={t.service_id}>
@@ -86,15 +116,17 @@ export function StatsPage() {
           ))}
         </div>
       ) : (
-        <EmptyState
-          icon="📈"
-          title="Пока нет статистики"
-          description="Когда клиенты начнут приходить, здесь появится топ услуг."
-        />
+        statsLoading ? null : (
+          <EmptyState
+            icon="📈"
+            title="Пока нет статистики"
+            description="Когда клиенты начнут приходить, здесь появится топ услуг."
+          />
+        )
       )}
 
       <h3 style={{ margin: "16px 0 8px" }}>Кого пора вернуть</h3>
-      {returnClients.length > 0 ? (
+      {returnClientsLoading ? null : returnClients.length > 0 ? (
         <div className="list">
           {returnClients.map((rc) => (
             <div className="list-item" key={rc.client_id}>
@@ -110,11 +142,13 @@ export function StatsPage() {
           ))}
         </div>
       ) : (
-        <EmptyState
-          icon="✨"
-          title="Все клиенты были недавно"
-          description="Никого возвращать не нужно — продолжайте в том же духе."
-        />
+        returnClientsLoading ? null : (
+          <EmptyState
+            icon="✨"
+            title="Все клиенты были недавно"
+            description="Никого возвращать не нужно — продолжайте в том же духе."
+          />
+        )
       )}
     </div>
   );

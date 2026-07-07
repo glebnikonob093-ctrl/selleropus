@@ -16,6 +16,7 @@ from aiogram.exceptions import TelegramAPIError
 from app.models import (
     BOOKING_STATUS_CANCELLED,
     BOOKING_STATUS_CONFIRMED,
+    BOOKING_STATUS_LABELS_RU,
     Booking,
     Client,
     Master,
@@ -111,7 +112,7 @@ class Notifier:
             f"Услуга: {service.name}\n"
             f"Когда: {_format_local(booking.starts_at)}\n"
             f"Стоимость: {service.price} ₽\n"
-            f"Статус: {booking.status}"
+            f"Статус: {BOOKING_STATUS_LABELS_RU.get(booking.status, booking.status)}"
         )
         await self._safe_send_html(master.tg_chat_id, text)
         for tm in team_members or []:

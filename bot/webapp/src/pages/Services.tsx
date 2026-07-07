@@ -100,7 +100,8 @@ export function ServicesPage() {
             ? async () => {
                 if (!editing) return;
                 const ok = window.confirm(
-                  `Удалить услугу "${editing.name}"? Это действие нельзя отменить.`,
+                  `Скрыть услугу "${editing.name}"? Клиенты её не увидят при записи. ` +
+                    `Прошлые записи сохранятся, а вернуть услугу можно галочкой «Активна».`,
                 );
                 if (!ok) return;
                 await api.deleteService(editing.id);
