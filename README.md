@@ -3,6 +3,8 @@
 Mini-CRM в Telegram для самозанятых: бьюти-мастера, репетиторы, тренеры, фотографы.
 Все записи, клиенты, напоминания и доход — в одном Telegram, без Excel и блокнота.
 
+📖 Гайд для мастеров (без технических терминов): [docs/MASTER_GUIDE_RU.md](docs/MASTER_GUIDE_RU.md)
+
 ## Что внутри MVP
 
 * **Telegram-бот** (aiogram 3): `/start`, `/link`, `/today`, кнопка Mini App,
@@ -143,11 +145,3 @@ npm run lint        # eslint
 | `TELEGRAM_PROXY_URL`      | необязательный proxy для исходящих запросов к Telegram        |
 | `SCHEDULER_INTERVAL_SECONDS` | как часто шедулер тикает (по умолчанию 60 сек)             |
 | `DEFAULT_TIMEZONE`        | дефолтная таймзона мастера (по умолчанию `Europe/Moscow`)     |
-
-## Дальше (после MVP)
-
-* Telegram Stars / ЮKassa для подписки Pro/Premium.
-* Multi-master аккаунты (несколько мастеров под одним ИП).
-* Шаблоны сообщений и автоматические «верни клиента».
-* Брендированная страница записи.
-* Postgres + Alembic, S3-бэкап.
