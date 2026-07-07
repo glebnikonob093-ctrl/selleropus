@@ -95,6 +95,7 @@ async def _seed(session: AsyncSession) -> tuple[Master, Service]:
         tg_chat_id=1,
         slug="anna",
         display_name="Anna",
+        is_master=True,
         work_start_minutes=10 * 60,
         work_end_minutes=20 * 60,
         slot_step_minutes=60,
@@ -118,17 +119,10 @@ def test_client_link_falls_back_to_webapp_without_username() -> None:
     assert link == "https://app.example.com?master=anna"
 
 
-def test_client_choice_keyboard_offers_both_options() -> None:
-    kb = _client_choice_keyboard(_settings(), "anna")
+def test_client_choice_keyboard_has_booking_button() -> None:
+    kb = _client_choice_keyboard("anna")
     flat = [btn for row in kb.inline_keyboard for btn in row]
-    assert any(b.web_app is not None for b in flat)  # mini app
-    assert any(b.callback_data == "bkgo:anna" for b in flat)  # in-bot
-
-
-def test_client_choice_keyboard_without_webapp_only_chat() -> None:
-    kb = _client_choice_keyboard(_settings(webapp_url=""), "anna")
-    flat = [btn for row in kb.inline_keyboard for btn in row]
-    assert all(b.web_app is None for b in flat)
+    assert all(b.web_app is None for b in flat)  # no mini app option
     assert any(b.callback_data == "bkgo:anna" for b in flat)
 
 
@@ -169,7 +163,8 @@ async def test_full_in_bot_booking_flow(
     await _feed(dp, bot, Update(update_id=4, callback_query=_callback(f"bkday:{day}")))
     await _feed(dp, bot, Update(update_id=5, callback_query=_callback("bkslot:11:00")))
     await _feed(dp, bot, Update(update_id=6, callback_query=_callback("bkname")))
-    await _feed(dp, bot, Update(update_id=7, callback_query=_callback("bkphone")))
+    # Phone is now required — send text instead of skipping.
+    await _feed(dp, bot, Update(update_id=7, message=_message("+79991234567", mid=3)))
     await _feed(dp, bot, Update(update_id=8, callback_query=_callback("bkok")))
 
     async with session_factory() as s:
@@ -183,6 +178,11 @@ async def test_full_in_bot_booking_flow(
     async with session_factory() as s:
         masters = list((await s.execute(select(Master))).scalars())
     assert {m.tg_user_id for m in masters} == {1}
+    # Verify phone was recorded
+    async with session_factory() as s:
+        from app.models import Client
+        clients = list((await s.execute(select(Client))).scalars())
+    assert any(c.phone == "+79991234567" for c in clients)
 
 
 async def test_unknown_slug_is_handled_gracefully(

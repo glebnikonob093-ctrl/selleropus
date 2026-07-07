@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_master, get_session
+from app.api.deps import get_current_active_master, get_current_master, get_session
 from app.models import Master
 from app.repos import generate_unique_slug, slugify
 
@@ -17,6 +17,7 @@ class MeResponse(BaseModel):
     tg_username: str | None
     display_name: str
     slug: str
+    is_master: bool
     timezone: str
     language: str
     work_start_minutes: int
@@ -34,6 +35,7 @@ def _to_response(master: Master) -> MeResponse:
         tg_username=master.tg_username,
         display_name=master.display_name,
         slug=master.slug,
+        is_master=master.is_master,
         timezone=master.timezone,
         language=master.language,
         work_start_minutes=master.work_start_minutes,
@@ -60,7 +62,7 @@ class UpdateMeRequest(BaseModel):
 @router.patch("", response_model=MeResponse)
 async def update_me(
     payload: UpdateMeRequest,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> MeResponse:
     if payload.display_name is not None:

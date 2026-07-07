@@ -96,6 +96,13 @@ a {
   font-size: 20px;
 }
 
+.bottom-nav__label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+
 /* ---- Page header ---- */
 .page-header {
   display: flex;
@@ -443,4 +450,114 @@ a {
   font-family: ui-monospace, monospace;
   font-size: 13px;
   word-break: break-all;
+}
+
+/* ---- Mobile responsiveness ---- */
+html, body {
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
+.page-header {
+  flex-wrap: wrap;
+}
+
+.page-header__title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.list-item__row {
+  flex-wrap: wrap;
+}
+
+.list-item__actions {
+  flex-wrap: wrap;
+}
+
+.field__row {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 480px) {
+  .app-shell__main {
+    padding: 12px 10px 88px;
+  }
+
+  .page-header__title {
+    font-size: 20px;
+  }
+
+  .card {
+    padding: 12px;
+    border-radius: 12px;
+  }
+
+  .list-item {
+    padding: 10px 12px;
+    border-radius: 10px;
+  }
+
+  .kpi-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+
+  .kpi {
+    padding: 10px;
+  }
+
+  .kpi__value {
+    font-size: 18px;
+  }
+
+  .slot-grid {
+    grid-template-columns: repeat(auto-fill, minmax(68px, 1fr));
+    gap: 6px;
+  }
+
+  .btn {
+    padding: 8px 12px;
+    font-size: 14px;
+  }
+
+  .btn--small {
+    padding: 5px 10px;
+    font-size: 12px;
+  }
+
+  .modal {
+    padding: 12px;
+    border-radius: 14px 14px 0 0;
+  }
+
+  .segment__btn {
+    padding: 6px 0;
+    font-size: 13px;
+  }
+
+  .bottom-nav__item {
+    font-size: 10px;
+    padding: 4px 4px;
+  }
+
+  .bottom-nav__icon {
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 360px) {
+  .app-shell__main {
+    padding: 10px 8px 84px;
+  }
+
+  .page-header__title {
+    font-size: 18px;
+  }
+
+  .kpi-grid {
+    grid-template-columns: 1fr;
+  }
 }

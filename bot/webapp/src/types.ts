@@ -11,6 +11,7 @@ export interface Me {
   tg_username: string | null;
   display_name: string;
   slug: string;
+  is_master: boolean;
   timezone: string;
   language: string;
   work_start_minutes: number;
@@ -36,6 +37,7 @@ export interface Client {
   notes: string | null;
   last_visit_at: string | null;
   created_at: string;
+  is_blocked: boolean;
 }
 
 export interface ClientDetail extends Client {

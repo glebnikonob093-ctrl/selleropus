@@ -54,12 +54,14 @@ class Master(Base):
 
     display_name: Mapped[str] = mapped_column(String(120), default="")
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     language: Mapped[str] = mapped_column(String(8), default="ru")
 
     work_start_minutes: Mapped[int] = mapped_column(Integer, default=10 * 60)  # 10:00
     work_end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)  # 20:00
     slot_step_minutes: Mapped[int] = mapped_column(Integer, default=30)
+    book_days_ahead: Mapped[int] = mapped_column(Integer, default=30)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -179,4 +181,89 @@ class MasterDailySummary(Base):
 
     __table_args__ = (
         UniqueConstraint("master_id", "day", name="uq_master_daily_summary"),
+    )
+
+
+class MasterBot(Base):
+    """A per-master Telegram bot that clients use to book appointments.
+
+    Each master can optionally connect their own Telegram bot (created via
+    BotFather). The platform runs polling for all active master bots.
+    """
+
+    __tablename__ = "master_bots"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), unique=True, index=True)
+    bot_token: Mapped[str] = mapped_column(String(100))
+    bot_username: Mapped[str] = mapped_column(String(64), default="")
+    bot_id: Mapped[int] = mapped_column(BigInteger, unique=True, index=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    master: Mapped[Master] = relationship()
+
+
+class BlockedClient(Base):
+    """A client blocked by a master. Blocked clients cannot book via master bot."""
+
+    __tablename__ = "blocked_clients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    blocked_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "tg_user_id", name="uq_blocked_client_master_tg"),
+    )
+
+
+class MasterSchedule(Base):
+    """Per-weekday working hours for a master."""
+
+    __tablename__ = "master_schedules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    weekday: Mapped[int] = mapped_column(Integer)  # 0=Mon .. 6=Sun
+    is_working: Mapped[bool] = mapped_column(Boolean, default=True)
+    start_minutes: Mapped[int] = mapped_column(Integer, default=10 * 60)
+    end_minutes: Mapped[int] = mapped_column(Integer, default=20 * 60)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "weekday", name="uq_master_schedule_weekday"),
+    )
+
+
+class MasterDayOff(Base):
+    """A specific date marked as day-off by a master."""
+
+    __tablename__ = "master_day_offs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    day: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "day", name="uq_master_day_off"),
+    )
+
+
+class TeamMember(Base):
+    """A team member added by a master. Receives booking notifications."""
+
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
+    tg_user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    tg_username: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    display_name: Mapped[str] = mapped_column(String(120), default="")
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("master_id", "tg_user_id", name="uq_team_member_master_tg"),
     )

@@ -33,7 +33,8 @@ class _RecordingNotifier:
 class _FrozenDatetime(datetime):
     @classmethod
     def utcnow(cls) -> datetime:  # type: ignore[override]
-        return datetime(2026, 6, 30, 8, 5)
+        # 05:05 UTC = 08:05 Europe/Moscow, inside the 08:00-08:14 window.
+        return datetime(2026, 6, 30, 5, 5)
 
 
 @pytest.fixture()
@@ -48,6 +49,7 @@ async def _make_master(session: AsyncSession, tg_user_id: int, slug: str) -> Mas
         tg_username=slug,
         display_name=slug.title(),
         slug=slug,
+        is_master=True,
     )
     session.add(master)
     await session.flush()
@@ -185,8 +187,8 @@ async def _make_booking_in_24h_window(
         client = Client(master_id=master.id, name="Bob")
         session.add(client)
         await session.flush()
-        # Frozen now is 2026-06-30 08:05; 24h window is [+24h, +24h+60m).
-        start = datetime(2026, 7, 1, 8, 30)
+        # Frozen now is 2026-06-30 05:05; 24h window is [+24h, +24h+60m).
+        start = datetime(2026, 7, 1, 5, 30)
         booking = Booking(
             master_id=master.id,
             client_id=client.id,

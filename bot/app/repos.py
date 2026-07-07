@@ -4,19 +4,24 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InitDataUser
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
     BOOKING_STATUS_CAME,
+    BlockedClient,
     Booking,
     Client,
     Master,
+    MasterBot,
+    MasterDayOff,
+    MasterSchedule,
     Service,
+    TeamMember,
 )
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -63,6 +68,7 @@ async def upsert_master_from_tg(
     default_work_start_minutes: int,
     default_work_end_minutes: int,
     default_slot_step_minutes: int,
+    is_master: bool = True,
 ) -> Master:
     """Find an existing master by Telegram id or create a new one."""
     master = await get_master_by_tg_id(session, tg_user_id)
@@ -71,6 +77,8 @@ async def upsert_master_from_tg(
             master.tg_chat_id = tg_chat_id
         if tg_username and master.tg_username != tg_username:
             master.tg_username = tg_username
+        if is_master and not master.is_master:
+            master.is_master = True
         return master
 
     slug_hint = tg_username or display_name_hint or f"m{tg_user_id}"
@@ -82,6 +90,7 @@ async def upsert_master_from_tg(
         tg_username=tg_username,
         display_name=display_name_hint or (tg_username or f"id{tg_user_id}"),
         slug=slug,
+        is_master=is_master,
         timezone=default_timezone,
         work_start_minutes=default_work_start_minutes,
         work_end_minutes=default_work_end_minutes,
@@ -100,18 +109,20 @@ async def upsert_master_from_initdata(
     default_work_start_minutes: int,
     default_work_end_minutes: int,
     default_slot_step_minutes: int,
+    is_master: bool = False,
 ) -> Master:
     name_hint = (f"{user.first_name} {user.last_name}".strip()) or user.username
     return await upsert_master_from_tg(
         session,
         tg_user_id=user.id,
-        tg_chat_id=user.id,  # Mini App users send messages to themselves; chat_id=user_id for private
+        tg_chat_id=user.id,
         tg_username=user.username or None,
         display_name_hint=name_hint or f"id{user.id}",
         default_timezone=default_timezone,
         default_work_start_minutes=default_work_start_minutes,
         default_work_end_minutes=default_work_end_minutes,
         default_slot_step_minutes=default_slot_step_minutes,
+        is_master=is_master,
     )
 
 
@@ -162,6 +173,59 @@ async def list_active_services(session: AsyncSession, master_id: int) -> list[Se
     return list(res.scalars())
 
 
+# ---- MasterBot helpers ----
+
+
+async def get_master_bot(session: AsyncSession, master_id: int) -> MasterBot | None:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.master_id == master_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def get_master_bot_by_bot_id(session: AsyncSession, bot_id: int) -> MasterBot | None:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.bot_id == bot_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def create_master_bot(
+    session: AsyncSession,
+    *,
+    master_id: int,
+    bot_token: str,
+    bot_username: str,
+    bot_id: int,
+) -> MasterBot:
+    mb = MasterBot(
+        master_id=master_id,
+        bot_token=bot_token,
+        bot_username=bot_username,
+        bot_id=bot_id,
+        is_active=True,
+    )
+    session.add(mb)
+    await session.flush()
+    return mb
+
+
+async def delete_master_bot(session: AsyncSession, master_id: int) -> bool:
+    mb = await get_master_bot(session, master_id)
+    if mb is None:
+        return False
+    await session.delete(mb)
+    await session.flush()
+    return True
+
+
+async def list_active_master_bots(session: AsyncSession) -> list[MasterBot]:
+    res = await session.execute(
+        select(MasterBot).where(MasterBot.is_active.is_(True))
+    )
+    return list(res.scalars())
+
+
 async def list_bookings_in_window(
     session: AsyncSession,
     master_id: int,
@@ -202,6 +266,110 @@ async def get_revenue(
     return sum(int(p or 0) for p in res.scalars())
 
 
+async def block_client(
+    session: AsyncSession,
+    master_id: int,
+    tg_user_id: int,
+    reason: str | None = None,
+) -> BlockedClient:
+    res = await session.execute(
+        select(BlockedClient).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        existing.reason = reason
+        return existing
+    bc = BlockedClient(master_id=master_id, tg_user_id=tg_user_id, reason=reason)
+    session.add(bc)
+    await session.flush()
+    return bc
+
+
+async def unblock_client(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(BlockedClient).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    bc = res.scalar_one_or_none()
+    if bc is None:
+        return False
+    await session.delete(bc)
+    await session.flush()
+    return True
+
+
+async def is_client_blocked(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(BlockedClient.id).where(
+            BlockedClient.master_id == master_id,
+            BlockedClient.tg_user_id == tg_user_id,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def list_blocked_clients(
+    session: AsyncSession, master_id: int
+) -> list[BlockedClient]:
+    res = await session.execute(
+        select(BlockedClient)
+        .where(BlockedClient.master_id == master_id)
+        .order_by(BlockedClient.blocked_at.desc())
+    )
+    return list(res.scalars())
+
+
+async def count_masters(session: AsyncSession) -> int:
+    res = await session.execute(
+        select(func.count()).select_from(Master).where(Master.is_master.is_(True))
+    )
+    return res.scalar_one()
+
+
+async def count_clients(session: AsyncSession) -> int:
+    res = await session.execute(select(func.count()).select_from(Client))
+    return res.scalar_one()
+
+
+async def count_bookings(session: AsyncSession) -> int:
+    res = await session.execute(select(func.count()).select_from(Booking))
+    return res.scalar_one()
+
+
+async def count_active_master_bots(session: AsyncSession) -> int:
+    res = await session.execute(
+        select(func.count()).select_from(MasterBot).where(MasterBot.is_active.is_(True))
+    )
+    return res.scalar_one()
+
+
+async def list_all_masters(session: AsyncSession) -> list[Master]:
+    res = await session.execute(
+        select(Master).where(Master.is_master.is_(True)).order_by(Master.created_at.desc())
+    )
+    return list(res.scalars())
+
+
+async def list_clients_for_master(
+    session: AsyncSession, master_id: int
+) -> list[Client]:
+    res = await session.execute(
+        select(Client)
+        .where(Client.master_id == master_id)
+        .order_by(Client.created_at.desc())
+    )
+    return list(res.scalars())
+
+
 async def find_clients_to_return(
     session: AsyncSession,
     master_id: int,
@@ -219,3 +387,242 @@ async def find_clients_to_return(
         .order_by(Client.last_visit_at.asc())
     )
     return list(res.scalars())
+
+
+# ---- Team members -----------------------------------------------------------
+
+
+async def add_team_member(
+    session: AsyncSession,
+    master_id: int,
+    tg_user_id: int,
+    tg_username: str | None = None,
+    display_name: str = "",
+) -> TeamMember:
+    res = await session.execute(
+        select(TeamMember).where(
+            TeamMember.master_id == master_id,
+            TeamMember.tg_user_id == tg_user_id,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        existing.tg_username = tg_username
+        existing.display_name = display_name or existing.display_name
+        return existing
+    tm = TeamMember(
+        master_id=master_id,
+        tg_user_id=tg_user_id,
+        tg_username=tg_username,
+        display_name=display_name,
+    )
+    session.add(tm)
+    await session.flush()
+    return tm
+
+
+async def remove_team_member(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(TeamMember).where(
+            TeamMember.master_id == master_id,
+            TeamMember.tg_user_id == tg_user_id,
+        )
+    )
+    tm = res.scalar_one_or_none()
+    if tm is None:
+        return False
+    await session.delete(tm)
+    return True
+
+
+async def list_team_members(
+    session: AsyncSession, master_id: int
+) -> list[TeamMember]:
+    res = await session.execute(
+        select(TeamMember)
+        .where(TeamMember.master_id == master_id)
+        .order_by(TeamMember.added_at.desc())
+    )
+    return list(res.scalars())
+
+
+# ---- Master schedule --------------------------------------------------------
+
+
+async def get_master_schedule(
+    session: AsyncSession, master_id: int
+) -> list[MasterSchedule]:
+    res = await session.execute(
+        select(MasterSchedule)
+        .where(MasterSchedule.master_id == master_id)
+        .order_by(MasterSchedule.weekday)
+    )
+    return list(res.scalars())
+
+
+async def get_schedule_for_weekday(
+    session: AsyncSession, master_id: int, weekday: int
+) -> MasterSchedule | None:
+    res = await session.execute(
+        select(MasterSchedule).where(
+            MasterSchedule.master_id == master_id,
+            MasterSchedule.weekday == weekday,
+        )
+    )
+    return res.scalar_one_or_none()
+
+
+async def init_default_schedule(
+    session: AsyncSession,
+    master_id: int,
+    work_start: int = 10 * 60,
+    work_end: int = 20 * 60,
+) -> list[MasterSchedule]:
+    """Create 7 schedule rows (Mon-Sun) if none exist. Sat/Sun default off."""
+    existing = await get_master_schedule(session, master_id)
+    if existing:
+        return existing
+    rows: list[MasterSchedule] = []
+    for wd in range(7):
+        row = MasterSchedule(
+            master_id=master_id,
+            weekday=wd,
+            is_working=wd < 5,
+            start_minutes=work_start,
+            end_minutes=work_end,
+        )
+        session.add(row)
+        rows.append(row)
+    await session.flush()
+    return rows
+
+
+async def toggle_schedule_day(
+    session: AsyncSession, master_id: int, weekday: int
+) -> bool:
+    """Toggle working/not-working for a weekday. Returns new is_working."""
+    row = await get_schedule_for_weekday(session, master_id, weekday)
+    if row is None:
+        return False
+    row.is_working = not row.is_working
+    return row.is_working
+
+
+async def adjust_schedule_time(
+    session: AsyncSession,
+    master_id: int,
+    weekday: int,
+    field: str,
+    delta: int,
+) -> int:
+    """Adjust start_minutes or end_minutes by delta. Returns new value."""
+    row = await get_schedule_for_weekday(session, master_id, weekday)
+    if row is None:
+        return 0
+    if field == "start":
+        row.start_minutes = max(0, min(23 * 60, row.start_minutes + delta))
+        if row.start_minutes >= row.end_minutes:
+            row.start_minutes = row.end_minutes - 30
+        return row.start_minutes
+    row.end_minutes = max(60, min(24 * 60, row.end_minutes + delta))
+    if row.end_minutes <= row.start_minutes:
+        row.end_minutes = row.start_minutes + 30
+    return row.end_minutes
+
+
+# ---- Master day-offs --------------------------------------------------------
+
+
+async def list_day_offs(
+    session: AsyncSession, master_id: int
+) -> list[MasterDayOff]:
+    res = await session.execute(
+        select(MasterDayOff)
+        .where(MasterDayOff.master_id == master_id)
+        .order_by(MasterDayOff.day)
+    )
+    return list(res.scalars())
+
+
+async def is_day_off(
+    session: AsyncSession, master_id: int, day: date
+) -> bool:
+    res = await session.execute(
+        select(MasterDayOff).where(
+            MasterDayOff.master_id == master_id,
+            MasterDayOff.day == day,
+        )
+    )
+    return res.scalar_one_or_none() is not None
+
+
+async def toggle_day_off(
+    session: AsyncSession, master_id: int, day: date
+) -> bool:
+    """Toggle day-off. Returns True if day is now a day-off."""
+    res = await session.execute(
+        select(MasterDayOff).where(
+            MasterDayOff.master_id == master_id,
+            MasterDayOff.day == day,
+        )
+    )
+    existing = res.scalar_one_or_none()
+    if existing is not None:
+        await session.delete(existing)
+        return False
+    session.add(MasterDayOff(master_id=master_id, day=day))
+    await session.flush()
+    return True
+
+
+# ---- Admin: delete master ---------------------------------------------------
+
+
+async def delete_master_full(session: AsyncSession, master_id: int) -> bool:
+    """Delete a master and all associated data (cascading)."""
+    res = await session.execute(
+        select(Master).where(Master.id == master_id)
+    )
+    master = res.scalar_one_or_none()
+    if master is None:
+        return False
+
+    # Delete associated master bot
+    bot_res = await session.execute(
+        select(MasterBot).where(MasterBot.master_id == master_id)
+    )
+    mb = bot_res.scalar_one_or_none()
+    if mb is not None:
+        await session.delete(mb)
+
+    # Delete blocked clients
+    blocked_res = await session.execute(
+        select(BlockedClient).where(BlockedClient.master_id == master_id)
+    )
+    for bc in blocked_res.scalars():
+        await session.delete(bc)
+
+    # Delete team members
+    team_res = await session.execute(
+        select(TeamMember).where(TeamMember.master_id == master_id)
+    )
+    for tm in team_res.scalars():
+        await session.delete(tm)
+
+    # Delete schedule and day-offs
+    sched_res = await session.execute(
+        select(MasterSchedule).where(MasterSchedule.master_id == master_id)
+    )
+    for s in sched_res.scalars():
+        await session.delete(s)
+    off_res = await session.execute(
+        select(MasterDayOff).where(MasterDayOff.master_id == master_id)
+    )
+    for o in off_res.scalars():
+        await session.delete(o)
+
+    # Master cascade handles services, clients, bookings
+    await session.delete(master)
+    return True

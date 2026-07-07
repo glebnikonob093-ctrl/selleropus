@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import AppState, get_app_state, get_current_master, get_session
+from app.api.deps import AppState, get_app_state, get_current_active_master, get_session
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
     BOOKING_STATUS_CAME,
@@ -124,7 +124,7 @@ async def _list_bookings(
 
 @router.get("", response_model=list[BookingOut])
 async def list_bookings(
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
     date_from: datetime | None = None,
     date_to: datetime | None = None,
@@ -141,7 +141,7 @@ async def list_bookings(
 
 @router.get("/today", response_model=list[BookingOut])
 async def list_today(
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> list[BookingOut]:
     start, end = _master_local_today_window(master)
@@ -153,7 +153,7 @@ async def list_today(
 @router.post("", response_model=BookingOut, status_code=201)
 async def create_booking(
     payload: BookingCreate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
     app_state: AppState = Depends(get_app_state),
 ) -> BookingOut:
@@ -243,7 +243,7 @@ async def _get_owned_booking(
 async def update_booking(
     booking_id: int,
     payload: BookingUpdate,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
     app_state: AppState = Depends(get_app_state),
 ) -> BookingOut:
@@ -304,7 +304,7 @@ async def update_booking(
 @router.delete("/{booking_id}", status_code=204, response_model=None)
 async def delete_booking(
     booking_id: int,
-    master: Master = Depends(get_current_master),
+    master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     booking, _client, _service = await _get_owned_booking(session, master, booking_id)

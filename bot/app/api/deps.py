@@ -92,7 +92,7 @@ async def get_current_master(
     init_data: InitData = Depends(get_init_data),
     session: AsyncSession = Depends(get_session),
 ) -> Master:
-    """Resolve (and lazily create) the master associated with this Mini App user."""
+    """Resolve (and lazily create) the user row associated with this Mini App user."""
     master = await get_master_by_tg_id(session, init_data.user.id)
     if master is None:
         master = await upsert_master_from_initdata(
@@ -104,5 +104,17 @@ async def get_current_master(
             default_work_end_minutes=state.settings.default_work_end[0] * 60
             + state.settings.default_work_end[1],
             default_slot_step_minutes=state.settings.default_slot_step_minutes,
+        )
+    return master
+
+
+async def get_current_active_master(
+    master: Master = Depends(get_current_master),
+) -> Master:
+    """Return 403 if the user is not a master (client-only accounts)."""
+    if not master.is_master:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="master access required",
         )
     return master
