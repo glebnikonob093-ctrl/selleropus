@@ -11,6 +11,7 @@ Flow:
 
 from __future__ import annotations
 
+import html
 import logging
 from datetime import datetime, timedelta
 
@@ -116,6 +117,19 @@ def _services_keyboard(services: list[Service]) -> InlineKeyboardMarkup:
     ]
     rows.append(_cancel_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _service_text(service: Service) -> str:
+    lines = [
+        f"<b>{html.escape(service.name)}</b> — {service.price}₽ · {service.duration_minutes}мин"
+    ]
+    if service.description:
+        lines.append(f"<i>↳ {html.escape(service.description)}</i>")
+    return "\n".join(lines)
+
+
+def _services_text(services: list[Service]) -> str:
+    return "\n\n".join(_service_text(service) for service in services)
 
 
 async def _calendar_keyboard(
@@ -276,8 +290,10 @@ def build_client_dispatcher(
             return
         await state.set_state(ClientBookingFlow.service)
         await message.answer(
-            "Выберите услугу:",
+            f"Выберите услугу:\n\n{_services_text(services)}",
             reply_markup=_services_keyboard(services),
+            parse_mode="HTML",
+            disable_web_page_preview=True,
         )
 
     # ---- /start ----
@@ -652,16 +668,23 @@ def build_client_dispatcher(
                 await callback.answer("Услуга недоступна", show_alert=True)
                 return
             service_name = service.name
+            service_description = service.description
 
-        await state.update_data(service_id=service_id, service_name=service_name)
+        await state.update_data(
+            service_id=service_id,
+            service_name=service_name,
+            service_description=service_description,
+        )
         await state.set_state(ClientBookingFlow.day)
         assert isinstance(callback.message, Message)
         async with session_scope(session_factory) as session:
             title, kb = await _calendar_keyboard(session, master_id)
+        service_text = _service_text(service)
         await callback.message.edit_text(
-            f"Услуга: <b>{service_name}</b>\n{title}\nВыберите день:",
+            f"Услуга:\n{service_text}\n\n{title}\nВыберите день:",
             reply_markup=kb,
             parse_mode="HTML",
+            disable_web_page_preview=True,
         )
         await callback.answer()
 
