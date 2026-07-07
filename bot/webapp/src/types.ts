@@ -23,6 +23,7 @@ export interface Me {
 export interface Service {
   id: number;
   name: string;
+  description: string | null;
   price: number;
   duration_minutes: number;
   is_active: boolean;
@@ -93,7 +94,15 @@ export interface ReturnClient {
 
 export interface PublicMasterPage {
   master: { slug: string; display_name: string };
-  services: Array<{ id: number; name: string; price: number; duration_minutes: number }>;
+  services: PublicService[];
+}
+
+export interface PublicService {
+  id: number;
+  name: string;
+  description: string | null;
+  price: number;
+  duration_minutes: number;
 }
 
 export interface PublicBookingResult {

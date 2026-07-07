@@ -67,6 +67,14 @@ export function ServicesPage() {
                   {formatPrice(s.price)} · {formatDuration(s.duration_minutes)}
                   {s.is_active ? "" : " · скрыта"}
                 </div>
+                {s.description ? (
+                  <div
+                    className="list-item__meta"
+                    style={{ marginTop: 4, whiteSpace: "pre-wrap" }}
+                  >
+                    {s.description}
+                  </div>
+                ) : null}
               </div>
             </div>
           </button>
@@ -129,6 +137,7 @@ function ServiceFormModal({
   onClose: () => void;
   onSubmit: (payload: {
     name: string;
+    description?: string | null;
     price: number;
     duration_minutes: number;
     is_active?: boolean;
@@ -136,6 +145,7 @@ function ServiceFormModal({
   onDelete?: () => Promise<void>;
 }) {
   const [name, setName] = useState(service?.name ?? "");
+  const [description, setDescription] = useState(service?.description ?? "");
   const [price, setPrice] = useState<string>(String(service?.price ?? 1500));
   const [duration, setDuration] = useState<string>(
     String(service?.duration_minutes ?? 60),
@@ -146,6 +156,7 @@ function ServiceFormModal({
 
   useEffect(() => {
     setName(service?.name ?? "");
+    setDescription(service?.description ?? "");
     setPrice(String(service?.price ?? 1500));
     setDuration(String(service?.duration_minutes ?? 60));
     setIsActive(service?.is_active ?? true);
@@ -172,6 +183,7 @@ function ServiceFormModal({
     try {
       await onSubmit({
         name: name.trim(),
+        description: description.trim() || null,
         price: Math.round(priceNum),
         duration_minutes: Math.round(durNum),
         is_active: isActive,
@@ -210,6 +222,15 @@ function ServiceFormModal({
           inputMode="numeric"
           value={duration}
           onChange={(e) => setDuration(e.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label className="field__label">Описание</label>
+        <textarea
+          className="field__textarea"
+          rows={4}
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
         />
       </div>
       <div className="field">

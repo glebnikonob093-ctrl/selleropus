@@ -14,6 +14,7 @@ router = APIRouter(prefix="/api/services", tags=["services"])
 class ServiceOut(BaseModel):
     id: int
     name: str
+    description: str | None
     price: int
     duration_minutes: int
     is_active: bool
@@ -23,6 +24,7 @@ class ServiceOut(BaseModel):
         return cls(
             id=svc.id,
             name=svc.name,
+            description=svc.description or None,
             price=svc.price,
             duration_minutes=svc.duration_minutes,
             is_active=svc.is_active,
@@ -31,6 +33,7 @@ class ServiceOut(BaseModel):
 
 class ServiceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
     price: int = Field(ge=0)
     duration_minutes: int = Field(ge=5, le=24 * 60)
     is_active: bool = True
@@ -38,6 +41,7 @@ class ServiceCreate(BaseModel):
 
 class ServiceUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=120)
+    description: str | None = Field(default=None, max_length=1000)
     price: int | None = Field(default=None, ge=0)
     duration_minutes: int | None = Field(default=None, ge=5, le=24 * 60)
     is_active: bool | None = None
@@ -62,9 +66,11 @@ async def create_service(
     master: Master = Depends(get_current_active_master),
     session: AsyncSession = Depends(get_session),
 ) -> ServiceOut:
+    description = payload.description.strip() if payload.description is not None else None
     svc = Service(
         master_id=master.id,
         name=payload.name.strip(),
+        description=description or None,
         price=payload.price,
         duration_minutes=payload.duration_minutes,
         is_active=payload.is_active,
@@ -96,6 +102,8 @@ async def update_service(
     svc = await _get_owned_service(session, master, service_id)
     if payload.name is not None:
         svc.name = payload.name.strip() or svc.name
+    if payload.description is not None:
+        svc.description = payload.description.strip() or None
     if payload.price is not None:
         svc.price = payload.price
     if payload.duration_minutes is not None:

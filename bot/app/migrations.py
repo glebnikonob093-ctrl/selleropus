@@ -22,6 +22,7 @@ async def create_all(engine: AsyncEngine) -> None:
     await _add_is_master_column(engine)
     await _add_book_days_ahead_column(engine)
     await _add_booking_access_columns(engine)
+    await _add_service_description_column(engine)
 
 
 async def _add_is_master_column(engine: AsyncEngine) -> None:
@@ -65,3 +66,14 @@ async def _add_booking_access_columns(engine: AsyncEngine) -> None:
             except Exception:
                 pass  # column already exists
 
+
+async def _add_service_description_column(engine: AsyncEngine) -> None:
+    """Idempotent ALTER: add ``description`` column to services."""
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(
+                text("ALTER TABLE services ADD COLUMN description TEXT DEFAULT ''")
+            )
+            log.info("Added description column to services table")
+        except Exception:
+            pass  # column already exists

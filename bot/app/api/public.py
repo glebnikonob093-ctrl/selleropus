@@ -37,6 +37,7 @@ class PublicMaster(BaseModel):
 class PublicService(BaseModel):
     id: int
     name: str
+    description: str | None
     price: int
     duration_minutes: int
 
@@ -61,6 +62,7 @@ async def get_public_master(
             PublicService(
                 id=s.id,
                 name=s.name,
+                description=s.description or None,
                 price=s.price,
                 duration_minutes=s.duration_minutes,
             )

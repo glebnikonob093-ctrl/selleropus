@@ -50,6 +50,7 @@ from app.models import (
     Master,
     MasterBot,
     Service,
+    TeamMember,
 )
 from app.notifications import Notifier
 from app.repos import (
@@ -330,6 +331,7 @@ def build_dispatcher(
 
     work_start_minutes = settings.default_work_start[0] * 60 + settings.default_work_start[1]
     work_end_minutes = settings.default_work_end[0] * 60 + settings.default_work_end[1]
+    team_bot_username = bot_username or "Clientikabot"
 
     async def _ensure_master(message: Message) -> Master:
         async with session_scope(session_factory) as session:
@@ -663,6 +665,62 @@ def build_dispatcher(
 
     def _is_admin(tg_user_id: int) -> bool:
         return tg_user_id in settings.admin_tg_user_ids
+
+    def _team_view_kb(members: list[TeamMember]) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                *[
+                    [
+                        InlineKeyboardButton(
+                            text=f"❌ {tm.display_name or tm.tg_user_id}",
+                            callback_data=f"teamrm:{tm.tg_user_id}",
+                        )
+                    ]
+                    for tm in members
+                ],
+                [InlineKeyboardButton(text="➕ Добавить участника", callback_data="team:add")],
+            ]
+        )
+
+    def _team_view_text(members: list[TeamMember]) -> str:
+        lines = ["<b>Ваша команда</b>", ""]
+        if not members:
+            lines.append("Пока нет участников команды.")
+        else:
+            for tm in members:
+                tg_link = ""
+                if tm.tg_username:
+                    username = tm.tg_username.lstrip("@")
+                    tg_link = f' · <a href="https://t.me/{username}">@{username}</a>'
+                lines.append(
+                    f"• {tm.display_name or 'Участник'}{tg_link} · <code>{tm.tg_user_id}</code>"
+                )
+        lines.extend(
+            [
+                "",
+                "Чтобы участник получал уведомления, он должен сначала открыть "
+                f"@{team_bot_username} и нажать Start.",
+            ]
+        )
+        return "\n".join(lines)
+
+    async def _show_team_view(
+        message: Message,
+        master: Master,
+        *,
+        prefix: str | None = None,
+    ) -> None:
+        async with session_scope(session_factory) as session:
+            members = await list_team_members(session, master.id)
+        text = _team_view_text(members)
+        if prefix:
+            text = f"{prefix}\n\n{text}"
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=_team_view_kb(members),
+            disable_web_page_preview=True,
+        )
 
     @router.message(CommandStart())
     async def on_start(message: Message, command: CommandObject, state: FSMContext) -> None:
@@ -1811,47 +1869,7 @@ def build_dispatcher(
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-
-        async with session_scope(session_factory) as session:
-            members = await list_team_members(session, master.id)
-
-        lines = ["<b>Ваша команда</b>\n"]
-        if not members:
-            lines.append("Пока нет участников команды.")
-        else:
-            for tm in members:
-                tg_link = ""
-                if tm.tg_username:
-                    username = tm.tg_username.lstrip("@")
-                    tg_link = f' · <a href="https://t.me/{username}">@{username}</a>'
-                lines.append(f"• {tm.display_name or 'Участник'}{tg_link} · <code>{tm.tg_user_id}</code>")
-
-        lines.append(
-            "\nДобавьте участника кнопкой ниже — он будет получать "
-            "уведомления о новых записях."
-        )
-
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="➕ Добавить участника", callback_data="team:add")],
-            ]
-        )
-        await message.answer(
-            "\n".join(lines),
-            parse_mode="HTML",
-            reply_markup=kb if not members else InlineKeyboardMarkup(
-                inline_keyboard=[
-                    *[
-                        [InlineKeyboardButton(
-                            text=f"❌ {tm.display_name or tm.tg_user_id}",
-                            callback_data=f"teamrm:{tm.tg_user_id}",
-                        )]
-                        for tm in members
-                    ],
-                    [InlineKeyboardButton(text="➕ Добавить", callback_data="team:add")],
-                ]
-            ),
-        )
+        await _show_team_view(message, master)
 
     @router.message(Command("addteam"))
     async def on_addteam(message: Message, command: CommandObject) -> None:
@@ -1877,15 +1895,29 @@ def build_dispatcher(
         except ValueError:
             await message.answer("Неверный формат TG ID.")
             return
+        if tg_user_id <= 0:
+            await message.answer("TG ID должен быть положительным числом.")
+            return
+        if tg_user_id == master.tg_user_id:
+            await message.answer(
+                "Вы уже получаете уведомления как мастер — добавлять себя не нужно."
+            )
+            return
 
         display_name = parts[1] if len(parts) > 1 else ""
         async with session_scope(session_factory) as session:
-            await add_team_member(session, master.id, tg_user_id, display_name=display_name)
-        await message.answer(
-            f"✅ Участник <code>{tg_user_id}</code> добавлен в команду.\n"
-            "Теперь ему будут приходить уведомления о записях.",
-            parse_mode="HTML",
-            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
+            member, created = await add_team_member(
+                session, master.id, tg_user_id, display_name=display_name
+            )
+        status = "добавлен" if created else "обновлён"
+        await _show_team_view(
+            message,
+            master,
+            prefix=(
+                f"✅ Участник <code>{member.tg_user_id}</code> {status} в команду."
+                "\nТеперь он будет получать уведомления о записях, если сначала "
+                f"откроет @{team_bot_username} и нажмёт Start."
+            ),
         )
 
     @router.message(Command("removeteam"))
@@ -1911,11 +1943,18 @@ def build_dispatcher(
         except ValueError:
             await message.answer("Неверный формат TG ID.")
             return
+        if tg_user_id <= 0:
+            await message.answer("TG ID должен быть положительным числом.")
+            return
 
         async with session_scope(session_factory) as session:
             removed = await remove_team_member(session, master.id, tg_user_id)
         if removed:
-            await message.answer(f"✅ Участник <code>{tg_user_id}</code> удалён из команды.", parse_mode="HTML")
+            await _show_team_view(
+                message,
+                master,
+                prefix=f"✅ Участник <code>{tg_user_id}</code> удалён из команды.",
+            )
         else:
             await message.answer("Этот участник не найден в команде.")
 
@@ -1931,6 +1970,8 @@ def build_dispatcher(
         await callback.message.answer(
             "Отправьте TG ID и имя участника в формате:\n"
             "<code>123456789 Имя</code>\n\n"
+            f"Перед добавлением попросите участника сначала открыть @{team_bot_username} "
+            "и нажать Start — иначе уведомления не придут.\n\n"
             "Для отмены отправьте /start",
             parse_mode="HTML",
         )
@@ -1952,15 +1993,30 @@ def build_dispatcher(
         except (ValueError, IndexError):
             await message.answer("Неверный формат. Укажите TG ID и имя через пробел.")
             return
+        if tg_user_id <= 0:
+            await message.answer("TG ID должен быть положительным числом.")
+            return
+        if tg_user_id == master.tg_user_id:
+            await message.answer(
+                "Вы уже получаете уведомления как мастер — добавлять себя не нужно."
+            )
+            return
 
         display_name = parts[1] if len(parts) > 1 else ""
         async with session_scope(session_factory) as session:
-            await add_team_member(session, master.id, tg_user_id, display_name=display_name)
+            member, created = await add_team_member(
+                session, master.id, tg_user_id, display_name=display_name
+            )
         await state.clear()
-        await message.answer(
-            f"✅ Участник <code>{tg_user_id}</code> добавлен в команду.",
-            parse_mode="HTML",
-            reply_markup=_master_menu_kb(_is_admin(from_user.id)),
+        status = "добавлен" if created else "обновлён"
+        await _show_team_view(
+            message,
+            master,
+            prefix=(
+                f"✅ Участник <code>{member.tg_user_id}</code> {status} в команду."
+                "\nТеперь он будет получать уведомления о записях, если сначала "
+                f"откроет @{team_bot_username} и нажмёт Start."
+            ),
         )
 
     @router.callback_query(F.data.startswith("teamrm:"))
@@ -1972,9 +2028,23 @@ def build_dispatcher(
             return
 
         tg_user_id = int((callback.data or "teamrm:0").split(":", 1)[1])
+        if tg_user_id <= 0:
+            await callback.answer("Некорректный TG ID", show_alert=True)
+            return
         async with session_scope(session_factory) as session:
-            await remove_team_member(session, master.id, tg_user_id)
-        await callback.answer(f"Участник {tg_user_id} удалён", show_alert=True)
+            removed = await remove_team_member(session, master.id, tg_user_id)
+            members = await list_team_members(session, master.id)
+        if isinstance(callback.message, Message):
+            await callback.message.edit_text(
+                _team_view_text(members),
+                parse_mode="HTML",
+                reply_markup=_team_view_kb(members),
+                disable_web_page_preview=True,
+            )
+        await callback.answer(
+            f"Участник {tg_user_id} {'удалён' if removed else 'не найден'}",
+            show_alert=True,
+        )
 
     # ---- Schedule management ---------------------------------------------------
 

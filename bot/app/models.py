@@ -102,6 +102,7 @@ class Service(Base):
     master_id: Mapped[int] = mapped_column(ForeignKey("masters.id"), index=True)
 
     name: Mapped[str] = mapped_column(String(120))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True, default="")
     price: Mapped[int] = mapped_column(Integer, default=0)  # in rubles, integer
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
