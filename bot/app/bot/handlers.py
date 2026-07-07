@@ -43,6 +43,8 @@ from app.config import Settings
 from app.db import session_scope
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
+    BOOKING_ACCESS_LINK,
+    BOOKING_ACCESS_OPEN,
     Booking,
     Client,
     Master,
@@ -74,6 +76,7 @@ from app.repos import (
     list_day_offs,
     list_team_members,
     remove_team_member,
+    set_master_booking_access,
     toggle_day_off,
     toggle_schedule_day,
     unblock_client,
@@ -91,7 +94,7 @@ _BOOK_DAYS_AHEAD = 14
 # Top-level category buttons
 _M_BTN_CAT_BOOKINGS = "📅 Записи"
 _M_BTN_CAT_CLIENTS = "👥 Клиенты"
-_M_BTN_CAT_BOT = "🤖 Бот и ссылка"
+_M_BTN_CAT_BOT = "🤖 Бот и доступ"
 _M_BTN_STATS = "📊 Статистика"
 _M_BTN_HELP = "❓ Помощь"
 _M_BTN_ADMIN = "👑 Админ-панель"
@@ -102,7 +105,7 @@ _M_BTN_ALL_BOOKINGS = "📋 Все записи"
 _M_BTN_SCHEDULE = "⏰ Расписание"
 _M_BTN_CLIENTS = "📋 Список клиентов"
 _M_BTN_BLOCKED = "🚫 Заблокированные"
-_M_BTN_LINK = "🔗 Ссылка для клиентов"
+_M_BTN_ACCESS = "🔐 Доступ к записи"
 _M_BTN_BOT = "🤖 Мой бот"
 _M_BTN_BOT_CONNECT = "➕ Подключить бота"
 _M_BTN_BOT_REMOVE = "❌ Отключить бота"
@@ -113,10 +116,10 @@ _HELP_TEXT = (
     "Всё делается кнопками внизу экрана:\n\n"
     "📅 <b>Записи</b> — записи на сегодня и настройка расписания.\n"
     "👥 <b>Клиенты</b> — список клиентов, история и блокировка.\n"
-    "🤖 <b>Бот и ссылка</b> — ваша ссылка для клиентов, подключение "
-    "и отключение вашего бота, ваша команда.\n"
+    "🤖 <b>Бот и доступ</b> — подключение и отключение вашего бота, "
+    "настройка доступа клиентов к записи, ваша команда.\n"
     "📊 <b>Статистика</b> — доход и количество записей.\n\n"
-    "Чтобы начать принимать записи: откройте «🤖 Бот и ссылка» → "
+    "Чтобы начать принимать записи: откройте «🤖 Бот и доступ» → "
     "«➕ Подключить бота» и следуйте подсказкам.\n\n"
     "Вернуться в начало — /start."
 )
@@ -194,12 +197,23 @@ def _clients_menu_kb() -> ReplyKeyboardMarkup:
 def _bot_menu_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text=_M_BTN_LINK)],
-            [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_TEAM)],
+            [KeyboardButton(text=_M_BTN_BOT), KeyboardButton(text=_M_BTN_ACCESS)],
             [KeyboardButton(text=_M_BTN_BOT_CONNECT), KeyboardButton(text=_M_BTN_BOT_REMOVE)],
+            [KeyboardButton(text=_M_BTN_TEAM)],
             [KeyboardButton(text=_M_BTN_BACK)],
         ],
         resize_keyboard=True,
+    )
+
+
+def _access_kb(mode: str) -> InlineKeyboardMarkup:
+    open_label = ("✅ " if mode == BOOKING_ACCESS_OPEN else "") + "🌍 Открытый доступ"
+    link_label = ("✅ " if mode == BOOKING_ACCESS_LINK else "") + "🔗 Только по ссылке"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=open_label, callback_data="acc:open")],
+            [InlineKeyboardButton(text=link_label, callback_data="acc:link")],
+        ]
     )
 
 
@@ -210,14 +224,15 @@ def _back_kb() -> ReplyKeyboardMarkup:
     )
 
 
-def _client_link(settings: Settings, bot_username: str, master: Master) -> str:
-    """The link a master shares with clients. Prefers the bot deep link."""
-    if bot_username:
-        return f"https://t.me/{bot_username}?start={master.slug}"
-    if settings.webapp_url:
-        base = settings.webapp_url.rstrip("/")
-        return f"{base}?{urlencode({'master': master.slug})}"
-    return f"?master={master.slug}"
+def _personal_bot_link(bot_username: str, master: Master) -> str:
+    """The link a master shares with clients — their personal bot.
+
+    In ``link`` access mode the link carries the master's access code so that
+    only people who receive it can book.
+    """
+    if master.booking_access == BOOKING_ACCESS_LINK and master.access_code:
+        return f"https://t.me/{bot_username}?start={master.access_code}"
+    return f"https://t.me/{bot_username}"
 
 
 def _miniapp_url(settings: Settings, slug: str) -> str | None:
@@ -658,16 +673,16 @@ def build_dispatcher(
             return
 
         master = await _ensure_master(message)
-        link = _client_link(settings, bot_username, master)
         is_admin = _is_admin(master.tg_user_id)
 
         bot_line = ""
         async with session_scope(session_factory) as session:
             mb = await get_master_bot(session, master.id)
             if mb is not None:
+                link = _personal_bot_link(mb.bot_username, master)
                 bot_line = (
                     f"\n🤖 Ваш бот для клиентов: @{mb.bot_username}\n"
-                    f"Ссылка: https://t.me/{mb.bot_username}\n"
+                    f"Ссылка: <code>{link}</code>\n"
                 )
 
         text = (
@@ -675,11 +690,10 @@ def build_dispatcher(
             "Это <b>Clientika</b> — ваш мини-CRM в Telegram:\n"
             "• услуги, клиенты и записи в одном месте,\n"
             "• автоматические напоминания клиентам,\n"
-            "• статистика дохода за день/неделю/месяц.\n\n"
-            f"Ваша ссылка для записи клиентов: <code>{link}</code>\n"
+            "• статистика дохода за день/неделю/месяц.\n"
             + bot_line
             + (
-                "\nЧтобы принимать записи — нажмите «🤖 Бот и ссылка» → "
+                "\nЧтобы принимать записи — нажмите «🤖 Бот и доступ» → "
                 "«➕ Подключить бота»."
                 if not bot_line
                 else ""
@@ -696,11 +710,30 @@ def build_dispatcher(
     async def _show_link(
         message: Message, master: Master, *, kb: ReplyKeyboardMarkup | None = None
     ) -> None:
-        link = _client_link(settings, bot_username, master)
         is_admin = _is_admin(master.tg_user_id)
         kb = kb or _master_menu_kb(is_admin)
+        async with session_scope(session_factory) as session:
+            mb = await get_master_bot(session, master.id)
+        if mb is None:
+            await message.answer(
+                "У вас пока нет подключённого бота.\n"
+                "Нажмите «➕ Подключить бота» — я подскажу, что делать.",
+                reply_markup=kb,
+            )
+            return
+        link = _personal_bot_link(mb.bot_username, master)
+        if master.booking_access == BOOKING_ACCESS_LINK:
+            note = (
+                "🔐 Доступ: <b>только по ссылке</b>.\n"
+                "Отправляйте эту ссылку только тем, кому хотите разрешить запись:"
+            )
+        else:
+            note = (
+                "🌍 Доступ: <b>открытый</b> — записаться может любой, "
+                "кто откроет вашего бота.\nВаша ссылка для клиентов:"
+            )
         await message.answer(
-            f"Ваша персональная ссылка для клиентов:\n<code>{link}</code>",
+            f"{note}\n<code>{link}</code>",
             parse_mode="HTML",
             reply_markup=kb,
             disable_web_page_preview=True,
@@ -1126,7 +1159,7 @@ def build_dispatcher(
             return
         await state.clear()
         await message.answer(
-            "🤖 <b>Бот и ссылка</b> — выберите:",
+            "🤖 <b>Бот и доступ</b> — выберите:",
             parse_mode="HTML",
             reply_markup=_bot_menu_kb(),
         )
@@ -1441,14 +1474,90 @@ def build_dispatcher(
             reply_markup=_master_menu_kb(_is_admin(from_user.id)),
         )
 
-    @router.message(F.text == _M_BTN_LINK)
-    async def on_btn_link(message: Message) -> None:
+    def _access_text(master: Master) -> str:
+        if master.booking_access == BOOKING_ACCESS_LINK:
+            return (
+                "🔐 <b>Доступ к записи</b>\n\n"
+                "Сейчас: <b>только по ссылке</b> — записаться могут лишь те, "
+                "кому вы отправили личную ссылку.\n\n"
+                "Ссылку показывает кнопка «🤖 Мой бот».\n\n"
+                "Выберите режим доступа:"
+            )
+        return (
+            "🔐 <b>Доступ к записи</b>\n\n"
+            "Сейчас: <b>открытый</b> — записаться может любой, кто откроет "
+            "вашего бота.\n\n"
+            "Выберите режим доступа:"
+        )
+
+    async def _show_access(
+        message: Message, master: Master
+    ) -> None:
+        await message.answer(
+            _access_text(master),
+            parse_mode="HTML",
+            reply_markup=_access_kb(master.booking_access),
+        )
+
+    @router.message(F.text == _M_BTN_ACCESS)
+    async def on_btn_access(message: Message) -> None:
         from_user = message.from_user
         assert from_user is not None
         master = await _get_existing_master(from_user.id)
         if master is None or not master.is_master:
             return
-        await _show_link(message, master, kb=_bot_menu_kb())
+        await _show_access(message, master)
+
+    @router.callback_query(F.data.startswith("acc:"))
+    async def on_access_toggle(callback: CallbackQuery) -> None:
+        from_user = callback.from_user
+        mode = (callback.data or "acc:").split(":", 1)[1]
+        if mode not in (BOOKING_ACCESS_OPEN, BOOKING_ACCESS_LINK):
+            await callback.answer()
+            return
+        assert isinstance(callback.message, Message)
+
+        link: str | None = None
+        async with session_scope(session_factory) as session:
+            res = await session.execute(
+                select(Master).where(Master.tg_user_id == from_user.id)
+            )
+            master = res.scalar_one_or_none()
+            if master is None or not master.is_master:
+                await callback.answer()
+                return
+            await set_master_booking_access(session, master, mode)
+            mb = await get_master_bot(session, master.id)
+            if mb is not None:
+                link = _personal_bot_link(mb.bot_username, master)
+            new_text = _access_text(master)
+
+        await callback.message.edit_text(
+            new_text,
+            parse_mode="HTML",
+            reply_markup=_access_kb(mode),
+        )
+        if mode == BOOKING_ACCESS_LINK:
+            if link is not None:
+                await callback.message.answer(
+                    "Готово! Отправляйте эту ссылку только тем, кому хотите "
+                    f"разрешить запись:\n<code>{link}</code>",
+                    parse_mode="HTML",
+                    reply_markup=_bot_menu_kb(),
+                    disable_web_page_preview=True,
+                )
+            else:
+                await callback.message.answer(
+                    "Готово! Сначала подключите бота («➕ Подключить бота»), "
+                    "чтобы получить ссылку для клиентов.",
+                    reply_markup=_bot_menu_kb(),
+                )
+        else:
+            await callback.message.answer(
+                "Готово! Теперь записаться может любой, кто откроет вашего бота.",
+                reply_markup=_bot_menu_kb(),
+            )
+        await callback.answer("Режим доступа обновлён")
 
     @router.message(F.text == _M_BTN_BOT)
     async def on_btn_bot(message: Message) -> None:
@@ -1471,10 +1580,18 @@ def build_dispatcher(
 
         running = multibot_manager.is_running(master.id) if multibot_manager else False
         status = "✅ работает" if running else "⚠️ остановлен"
+        link = _personal_bot_link(mb.bot_username, master)
+        access = (
+            "🔐 только по ссылке"
+            if master.booking_access == BOOKING_ACCESS_LINK
+            else "🌍 открытый"
+        )
         await message.answer(
             f"Ваш бот: @{mb.bot_username}\n"
             f"Статус: {status}\n"
-            f"Ссылка для клиентов: https://t.me/{mb.bot_username}",
+            f"Доступ: {access}\n"
+            f"Ссылка для клиентов: <code>{link}</code>",
+            parse_mode="HTML",
             disable_web_page_preview=True,
             reply_markup=_bot_menu_kb(),
         )

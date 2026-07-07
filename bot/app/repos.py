@@ -6,12 +6,13 @@ import re
 import secrets
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import InitDataUser
 from app.models import (
     ACTIVE_BOOKING_STATUSES,
+    BOOKING_ACCESS_LINK,
     BOOKING_STATUS_CAME,
     BlockedClient,
     Booking,
@@ -303,6 +304,65 @@ async def unblock_client(
     await session.delete(bc)
     await session.flush()
     return True
+
+
+async def ensure_master_access_code(session: AsyncSession, master: Master) -> str:
+    """Return the master's access code, generating one if it is empty."""
+    if not master.access_code:
+        master.access_code = secrets.token_urlsafe(9)
+        await session.flush()
+    return master.access_code
+
+
+async def set_master_booking_access(
+    session: AsyncSession, master: Master, mode: str
+) -> None:
+    """Set the master's client-access mode.
+
+    Switching to ``link`` generates an access code (if missing) and grants
+    access to all existing clients so current clients keep working.
+    """
+    master.booking_access = mode
+    if mode == BOOKING_ACCESS_LINK:
+        await ensure_master_access_code(session, master)
+        await session.execute(
+            update(Client)
+            .where(Client.master_id == master.id)
+            .values(access_granted=True)
+        )
+    await session.flush()
+
+
+async def grant_client_access(
+    session: AsyncSession,
+    master_id: int,
+    *,
+    tg_user_id: int,
+    name: str,
+    tg_username: str | None,
+) -> None:
+    """Mark a client as allowed to book under ``link`` access, creating them if needed."""
+    client = await find_or_create_client(
+        session,
+        master_id,
+        name=name,
+        tg_user_id=tg_user_id,
+        tg_username=tg_username,
+    )
+    client.access_granted = True
+    await session.flush()
+
+
+async def client_has_access(
+    session: AsyncSession, master_id: int, tg_user_id: int
+) -> bool:
+    res = await session.execute(
+        select(Client.access_granted).where(
+            Client.master_id == master_id,
+            Client.tg_user_id == tg_user_id,
+        )
+    )
+    return bool(res.scalar_one_or_none())
 
 
 async def is_client_blocked(

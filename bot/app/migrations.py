@@ -21,6 +21,7 @@ async def create_all(engine: AsyncEngine) -> None:
 
     await _add_is_master_column(engine)
     await _add_book_days_ahead_column(engine)
+    await _add_booking_access_columns(engine)
 
 
 async def _add_is_master_column(engine: AsyncEngine) -> None:
@@ -47,4 +48,20 @@ async def _add_book_days_ahead_column(engine: AsyncEngine) -> None:
             log.info("Added book_days_ahead column to masters table")
         except Exception:
             pass  # column already exists
+
+
+async def _add_booking_access_columns(engine: AsyncEngine) -> None:
+    """Idempotent ALTERs for the per-master client access-mode feature."""
+    statements = [
+        "ALTER TABLE masters ADD COLUMN booking_access VARCHAR(16) DEFAULT 'open'",
+        "ALTER TABLE masters ADD COLUMN access_code VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE clients ADD COLUMN access_granted BOOLEAN DEFAULT 0",
+    ]
+    for stmt in statements:
+        async with engine.begin() as conn:
+            try:
+                await conn.execute(text(stmt))
+                log.info("Applied migration: %s", stmt)
+            except Exception:
+                pass  # column already exists
 
