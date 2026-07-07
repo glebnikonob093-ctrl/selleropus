@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -115,39 +116,52 @@ async def _send_morning_summaries(
 ) -> None:
     """Once per day, around each master's morning, send a summary of today's bookings.
 
-    For the MVP we trigger when the local time is between 08:00 and 08:15 in the
-    master's timezone. We fall back to UTC math to keep it dependency-free.
+    Trigger when the master's local time is between 08:00 and 08:15.
+    Each master's timezone is checked individually so Moscow masters get
+    greeted at 08:00 MSK, not 08:00 UTC.
     """
-    now = datetime.utcnow()
-    if not (now.hour == 8 and now.minute < 15):
-        return
-
-    today = now.date()
-    day_start = datetime(now.year, now.month, now.day)
-    day_end = day_start + timedelta(days=1)
+    now_utc = datetime.utcnow()
 
     async with session_scope(session_factory) as session:
         masters = list((await session.execute(select(Master))).scalars())
 
         for master in masters:
+            # Determine master's local time.
+            try:
+                tz = ZoneInfo(master.timezone)
+            except (KeyError, ValueError):
+                tz = ZoneInfo("UTC")
+            local_now = now_utc.replace(tzinfo=ZoneInfo("UTC")).astimezone(tz)
+
+            if not (local_now.hour == 8 and local_now.minute < 15):
+                continue
+
+            local_today = local_now.date()
+
             # Per-master, per-day idempotency. Keyed on the day rather than a
             # booking row so masters with no bookings are still greeted once.
             already_q = await session.execute(
                 select(MasterDailySummary.id)
                 .where(MasterDailySummary.master_id == master.id)
-                .where(MasterDailySummary.day == today)
+                .where(MasterDailySummary.day == local_today)
                 .limit(1)
             )
             if already_q.scalar_one_or_none() is not None:
                 continue
+
+            # Query today's bookings using the master's local day boundaries
+            # converted back to UTC for the DB query.
+            local_day_start = datetime(local_today.year, local_today.month, local_today.day, tzinfo=tz)
+            day_start_utc = local_day_start.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+            day_end_utc = day_start_utc + timedelta(days=1)
 
             stmt = (
                 select(Booking, Client, Service)
                 .join(Client, Client.id == Booking.client_id)
                 .join(Service, Service.id == Booking.service_id)
                 .where(Booking.master_id == master.id)
-                .where(Booking.starts_at >= day_start)
-                .where(Booking.starts_at < day_end)
+                .where(Booking.starts_at >= day_start_utc)
+                .where(Booking.starts_at < day_end_utc)
                 .where(Booking.status.in_(ACTIVE_BOOKING_STATUSES))
                 .order_by(Booking.starts_at)
             )
@@ -162,17 +176,11 @@ async def _send_morning_summaries(
                 log.exception("morning_summary_failed master_id=%s", master.id)
                 continue
             if not delivered:
-                # Swallowed Telegram error: leave unmarked so a later tick within
-                # the morning window retries instead of recording it as sent.
                 continue
 
-            # Record the send only after a confirmed delivery. Use a SAVEPOINT so a
-            # duplicate-marker conflict (concurrent tick) only discards this
-            # master's insert and not markers already flushed for earlier masters
-            # in the shared transaction.
             try:
                 async with session.begin_nested():
-                    session.add(MasterDailySummary(master_id=master.id, day=today))
+                    session.add(MasterDailySummary(master_id=master.id, day=local_today))
                     await session.flush()
             except IntegrityError:  # pragma: no cover - concurrent tick
                 pass

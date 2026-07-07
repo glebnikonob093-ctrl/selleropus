@@ -54,6 +54,7 @@ class Master(Base):
 
     display_name: Mapped[str] = mapped_column(String(120), default="")
     slug: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    is_master: Mapped[bool] = mapped_column(Boolean, default=False)
     timezone: Mapped[str] = mapped_column(String(64), default="Europe/Moscow")
     language: Mapped[str] = mapped_column(String(8), default="ru")
 

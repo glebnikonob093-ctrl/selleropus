@@ -63,6 +63,7 @@ async def upsert_master_from_tg(
     default_work_start_minutes: int,
     default_work_end_minutes: int,
     default_slot_step_minutes: int,
+    is_master: bool = True,
 ) -> Master:
     """Find an existing master by Telegram id or create a new one."""
     master = await get_master_by_tg_id(session, tg_user_id)
@@ -71,6 +72,8 @@ async def upsert_master_from_tg(
             master.tg_chat_id = tg_chat_id
         if tg_username and master.tg_username != tg_username:
             master.tg_username = tg_username
+        if is_master and not master.is_master:
+            master.is_master = True
         return master
 
     slug_hint = tg_username or display_name_hint or f"m{tg_user_id}"
@@ -82,6 +85,7 @@ async def upsert_master_from_tg(
         tg_username=tg_username,
         display_name=display_name_hint or (tg_username or f"id{tg_user_id}"),
         slug=slug,
+        is_master=is_master,
         timezone=default_timezone,
         work_start_minutes=default_work_start_minutes,
         work_end_minutes=default_work_end_minutes,
@@ -100,18 +104,20 @@ async def upsert_master_from_initdata(
     default_work_start_minutes: int,
     default_work_end_minutes: int,
     default_slot_step_minutes: int,
+    is_master: bool = False,
 ) -> Master:
     name_hint = (f"{user.first_name} {user.last_name}".strip()) or user.username
     return await upsert_master_from_tg(
         session,
         tg_user_id=user.id,
-        tg_chat_id=user.id,  # Mini App users send messages to themselves; chat_id=user_id for private
+        tg_chat_id=user.id,
         tg_username=user.username or None,
         display_name_hint=name_hint or f"id{user.id}",
         default_timezone=default_timezone,
         default_work_start_minutes=default_work_start_minutes,
         default_work_end_minutes=default_work_end_minutes,
         default_slot_step_minutes=default_slot_step_minutes,
+        is_master=is_master,
     )
 
 
