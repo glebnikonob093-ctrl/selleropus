@@ -25,6 +25,7 @@ def _settings(webapp_url: str = "https://app.example.com") -> Settings:
     return Settings(
         bot_token="123456:TEST",
         bot_username=BOT_USERNAME,
+        support_username="ClientikaSupport",
         database_url="sqlite+aiosqlite:///:memory:",
         api_host="127.0.0.1",
         api_port=8000,

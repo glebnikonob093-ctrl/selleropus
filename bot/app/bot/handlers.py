@@ -112,18 +112,21 @@ _M_BTN_BOT_CONNECT = "➕ Подключить бота"
 _M_BTN_BOT_REMOVE = "❌ Отключить бота"
 _M_BTN_TEAM = "👥 Команда"
 
-_HELP_TEXT = (
-    "❓ <b>Как пользоваться Clientika</b>\n\n"
-    "Всё делается кнопками внизу экрана:\n\n"
-    "📅 <b>Записи</b> — записи на сегодня и настройка расписания.\n"
-    "👥 <b>Клиенты</b> — список клиентов, история и блокировка.\n"
-    "🤖 <b>Бот и доступ</b> — подключение и отключение вашего бота, "
-    "настройка доступа клиентов к записи, ваша команда.\n"
-    "📊 <b>Статистика</b> — доход и количество записей.\n\n"
-    "Чтобы начать принимать записи: откройте «🤖 Бот и доступ» → "
-    "«➕ Подключить бота» и следуйте подсказкам.\n\n"
-    "Вернуться в начало — /start."
-)
+def _build_help_text(support_username: str) -> str:
+    return (
+        "❓ <b>Как пользоваться Clientika</b>\n\n"
+        f"🆘 <b>Поддержка и обратная связь:</b> "
+        f'<a href="https://t.me/{support_username}">@{support_username}</a>\n\n'
+        "Всё делается кнопками внизу экрана:\n\n"
+        "📅 <b>Записи</b> — записи на сегодня и настройка расписания.\n"
+        "👥 <b>Клиенты</b> — список клиентов, история и блокировка.\n"
+        "🤖 <b>Бот и доступ</b> — подключение и отключение вашего бота, "
+        "настройка доступа клиентов к записи, ваша команда.\n"
+        "📊 <b>Статистика</b> — доход и количество записей.\n\n"
+        "Чтобы начать принимать записи: откройте «🤖 Бот и доступ» → "
+        "«➕ Подключить бота» и следуйте подсказкам.\n\n"
+        "Вернуться в начало — /start."
+    )
 
 
 class BookingFlow(StatesGroup):
@@ -328,6 +331,7 @@ def build_dispatcher(
 ) -> Dispatcher:
     dp = Dispatcher(storage=MemoryStorage())
     router = Router(name="clientika")
+    help_text = _build_help_text(settings.support_username)
 
     work_start_minutes = settings.default_work_start[0] * 60 + settings.default_work_start[1]
     work_end_minutes = settings.default_work_end[0] * 60 + settings.default_work_end[1]
@@ -938,7 +942,7 @@ def build_dispatcher(
         assert from_user is not None
         is_admin = _is_admin(from_user.id)
         await message.answer(
-            _HELP_TEXT,
+            help_text,
             parse_mode="HTML",
             reply_markup=_master_menu_kb(is_admin),
             disable_web_page_preview=True,
@@ -1820,7 +1824,7 @@ def build_dispatcher(
         from_user = message.from_user
         assert from_user is not None
         await message.answer(
-            _HELP_TEXT,
+            help_text,
             parse_mode="HTML",
             reply_markup=_master_menu_kb(_is_admin(from_user.id)),
             disable_web_page_preview=True,
