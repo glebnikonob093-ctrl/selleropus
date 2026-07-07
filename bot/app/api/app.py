@@ -71,7 +71,8 @@ def create_api_app(
                     name="assets",
                 )
 
-            index_file = path / "index.html"
+            base_dir = path.resolve()
+            index_file = base_dir / "index.html"
 
             @app.get("/", include_in_schema=False, response_model=None)
             async def _index() -> FileResponse:
@@ -81,8 +82,8 @@ def create_api_app(
             async def _spa_fallback(full_path: str) -> FileResponse | JSONResponse:
                 if full_path.startswith("api/"):
                     return JSONResponse({"detail": "not found"}, status_code=404)
-                target = path / full_path
-                if target.is_file():
+                target = (base_dir / full_path).resolve()
+                if target.is_file() and target.is_relative_to(base_dir):
                     return FileResponse(str(target))
                 return FileResponse(str(index_file))
 
