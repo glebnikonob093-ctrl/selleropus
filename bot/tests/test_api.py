@@ -170,6 +170,30 @@ def test_app_builds_and_serves_spa_with_dist_dir(
     assert spa_client.get("/api/does-not-exist").status_code == 404
 
 
+def test_spa_fallback_blocks_path_traversal(
+    session_factory: async_sessionmaker[AsyncSession], tmp_path
+) -> None:
+    # The SPA fallback builds a path from user input; it must not let a
+    # traversal sequence escape the dist dir and read arbitrary files.
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<!doctype html>SPA", encoding="utf-8")
+    secret = tmp_path / "secret.txt"
+    secret.write_text("TOP-SECRET", encoding="utf-8")
+
+    settings = _settings()
+    settings = Settings(**{**settings.__dict__, "webapp_dist_dir": str(dist)})
+    app = create_api_app(settings=settings, session_factory=session_factory, notifier=None)
+    # raise_server_exceptions=False so a 500 surfaces as a response, not an error.
+    spa_client = TestClient(app, raise_server_exceptions=False)
+
+    # URL-encoded "../secret.txt" so the client does not normalize it away.
+    res = spa_client.get("/%2e%2e/secret.txt")
+    assert "TOP-SECRET" not in res.text
+    assert res.status_code == 200
+    assert "SPA" in res.text
+
+
 def test_public_availability_uses_date_alias(client: TestClient) -> None:
     headers = _auth_headers(MASTER)
     me = client.get("/api/me", headers=headers).json()
